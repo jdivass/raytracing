@@ -13,15 +13,26 @@ mod world;
 
 use camera::Camera;
 use framebuffer::Framebuffer;
-use material::Material;
 use ray_intersect::RayIntersect;
 use world::VoxelWorld;
 
 pub fn cast_ray(ray_origin: &Vector3, ray_direction: &Vector3, world: &VoxelWorld) -> Color {
+    let sky = Color::new(85, 142, 212, 255);
     world
         .ray_intersect(ray_origin, ray_direction)
-        .map_or(Color::new(85, 142, 212, 255), |(material, _)| {
-            material.diffuse
+        .map_or(sky, |hit| {
+            let color = hit.material.color_at(hit.position, hit.normal);
+            if color.a == 255 {
+                return color;
+            }
+
+            let alpha = color.a as f32 / 255.0;
+            Color::new(
+                (color.r as f32 * alpha + sky.r as f32 * (1.0 - alpha)) as u8,
+                (color.g as f32 * alpha + sky.g as f32 * (1.0 - alpha)) as u8,
+                (color.b as f32 * alpha + sky.b as f32 * (1.0 - alpha)) as u8,
+                255,
+            )
         })
 }
 

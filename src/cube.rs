@@ -1,7 +1,7 @@
 use raylib::prelude::*;
 
 use crate::material::Material;
-use crate::ray_intersect::RayIntersect;
+use crate::ray_intersect::{RayHit, RayIntersect};
 
 pub struct Cube {
     pub center: Vector3,
@@ -22,11 +22,7 @@ impl Cube {
 }
 
 impl RayIntersect for Cube {
-    fn ray_intersect(
-        &self,
-        ray_origin: &Vector3,
-        ray_direction: &Vector3,
-    ) -> Option<(Material, f32)> {
+    fn ray_intersect(&self, ray_origin: &Vector3, ray_direction: &Vector3) -> Option<RayHit> {
         let half_size = self.size * 0.5;
         let min = self.center - Vector3::new(half_size, half_size, half_size);
         let max = self.center + Vector3::new(half_size, half_size, half_size);
@@ -68,8 +64,40 @@ impl RayIntersect for Cube {
             return None;
         };
 
-        Some((self.material, t))
+        let position = *ray_origin + *ray_direction * t;
+        let normal = cube_normal(position, min, max);
+        Some(RayHit {
+            material: self.material.clone(),
+            distance: t,
+            position,
+            normal,
+        })
     }
+}
+
+fn cube_normal(position: Vector3, min: Vector3, max: Vector3) -> Vector3 {
+    let distances = [
+        (position.x - min.x).abs(),
+        (position.x - max.x).abs(),
+        (position.y - min.y).abs(),
+        (position.y - max.y).abs(),
+        (position.z - min.z).abs(),
+        (position.z - max.z).abs(),
+    ];
+    let face = distances
+        .iter()
+        .enumerate()
+        .min_by(|(_, left), (_, right)| left.total_cmp(right))
+        .map(|(index, _)| index)
+        .unwrap();
+    [
+        Vector3::new(-1.0, 0.0, 0.0),
+        Vector3::new(1.0, 0.0, 0.0),
+        Vector3::new(0.0, -1.0, 0.0),
+        Vector3::new(0.0, 1.0, 0.0),
+        Vector3::new(0.0, 0.0, -1.0),
+        Vector3::new(0.0, 0.0, 1.0),
+    ][face]
 }
 
 #[cfg(test)]
@@ -80,9 +108,7 @@ mod tests {
         Cube::new(
             Vector3::new(0.0, 0.0, -5.0),
             2.0,
-            Material {
-                diffuse: Color::WHITE,
-            },
+            Material::solid(Color::WHITE),
         )
     }
 
@@ -92,7 +118,7 @@ mod tests {
             .ray_intersect(&Vector3::new(0.0, 0.0, 0.0), &Vector3::new(0.0, 0.0, -1.0))
             .expect("ray should hit the cube");
 
-        assert!((hit.1 - 4.0).abs() < f32::EPSILON);
+        assert!((hit.distance - 4.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -109,6 +135,6 @@ mod tests {
             .ray_intersect(&Vector3::new(0.0, 0.0, -5.0), &Vector3::new(1.0, 0.0, 0.0))
             .expect("ray should leave the cube");
 
-        assert!((hit.1 - 1.0).abs() < f32::EPSILON);
+        assert!((hit.distance - 1.0).abs() < f32::EPSILON);
     }
 }

@@ -5,7 +5,8 @@ use flate2::read::GzDecoder;
 use raylib::prelude::*;
 
 use crate::material::Material;
-use crate::ray_intersect::RayIntersect;
+use crate::material::TextureLibrary;
+use crate::ray_intersect::{RayHit, RayIntersect};
 
 pub struct VoxelWorld {
     width: usize,
@@ -31,10 +32,12 @@ impl VoxelWorld {
             .ok_or("schematic dimensions are too large")?;
 
         let mut blocks = vec![None; block_count];
+        let texture_directory = format!("{}/textures", env!("CARGO_MANIFEST_DIR"));
+        let mut textures = TextureLibrary::new(texture_directory);
         let palette = schematic
             .palette
             .into_iter()
-            .map(|(index, block)| (index, material_for_block(&block)))
+            .map(|(index, block)| (index, material_for_block(&block, &mut textures)))
             .collect::<HashMap<_, _>>();
 
         let palette_indices = decode_varints(&schematic.block_data)?;
@@ -54,7 +57,7 @@ impl VoxelWorld {
                     let world_index = schematic_index;
                     blocks[world_index] = palette
                         .get(&palette_indices[schematic_index])
-                        .copied()
+                        .cloned()
                         .flatten();
                 }
             }
@@ -107,18 +110,10 @@ impl VoxelWorld {
 
         Some(x as usize + z as usize * self.width + y as usize * self.width * self.length)
     }
-
-    fn block_at(&self, x: isize, y: isize, z: isize) -> Option<Material> {
-        self.index(x, y, z).and_then(|index| self.blocks[index])
-    }
 }
 
 impl RayIntersect for VoxelWorld {
-    fn ray_intersect(
-        &self,
-        ray_origin: &Vector3,
-        ray_direction: &Vector3,
-    ) -> Option<(Material, f32)> {
+    fn ray_intersect(&self, ray_origin: &Vector3, ray_direction: &Vector3) -> Option<RayHit> {
         let (entry, exit) = ray_box_interval(*ray_origin, *ray_direction, self.min, self.max)?;
         const MIN_RAY_DISTANCE: f32 = 0.001;
         let start_distance = entry.max(MIN_RAY_DISTANCE);
@@ -141,20 +136,39 @@ impl RayIntersect for VoxelWorld {
         let (step_x, mut next_x, delta_x) = grid_step(ray_origin.x, ray_direction.x, self.min.x, x);
         let (step_y, mut next_y, delta_y) = grid_step(ray_origin.y, ray_direction.y, self.min.y, y);
         let (step_z, mut next_z, delta_z) = grid_step(ray_origin.z, ray_direction.z, self.min.z, z);
+        let mut entered_at = start_distance;
 
         while let Some(index) = self.index(x, y, z) {
-            if let Some(material) = self.blocks[index] {
-                let distance = next_x.min(next_y).min(next_z).min(exit).max(start_distance);
-                return Some((material, distance));
+            if let Some(material) = &self.blocks[index] {
+                let position = Vector3::new(
+                    ray_origin.x + ray_direction.x * entered_at,
+                    ray_origin.y + ray_direction.y * entered_at,
+                    ray_origin.z + ray_direction.z * entered_at,
+                );
+                let cell_min = Vector3::new(
+                    self.min.x + x as f32,
+                    self.min.y + y as f32,
+                    self.min.z + z as f32,
+                );
+                let normal = voxel_face_normal(position, cell_min);
+                return Some(RayHit {
+                    material: material.clone(),
+                    distance: entered_at,
+                    position,
+                    normal,
+                });
             }
 
             if next_x <= next_y && next_x <= next_z {
+                entered_at = next_x;
                 x += step_x;
                 next_x += delta_x;
             } else if next_y <= next_z {
+                entered_at = next_y;
                 y += step_y;
                 next_y += delta_y;
             } else {
+                entered_at = next_z;
                 z += step_z;
                 next_z += delta_z;
             }
@@ -166,6 +180,36 @@ impl RayIntersect for VoxelWorld {
 
         None
     }
+}
+
+fn voxel_face_normal(position: Vector3, cell_min: Vector3) -> Vector3 {
+    let local = Vector3::new(
+        position.x - cell_min.x,
+        position.y - cell_min.y,
+        position.z - cell_min.z,
+    );
+    let distances = [
+        local.x,
+        1.0 - local.x,
+        local.y,
+        1.0 - local.y,
+        local.z,
+        1.0 - local.z,
+    ];
+    let face = distances
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    [
+        Vector3::new(-1.0, 0.0, 0.0),
+        Vector3::new(1.0, 0.0, 0.0),
+        Vector3::new(0.0, -1.0, 0.0),
+        Vector3::new(0.0, 1.0, 0.0),
+        Vector3::new(0.0, 0.0, -1.0),
+        Vector3::new(0.0, 0.0, 1.0),
+    ][face]
 }
 
 fn grid_step(origin: f32, direction: f32, minimum: f32, cell: isize) -> (isize, f32, f32) {
@@ -216,7 +260,7 @@ fn ray_box_interval(
     Some((entry, exit))
 }
 
-fn material_for_block(block_state: &str) -> Option<Material> {
+fn material_for_block(block_state: &str, textures: &mut TextureLibrary) -> Option<Material> {
     let block = block_state
         .strip_prefix("minecraft:")
         .unwrap_or(block_state)
@@ -268,9 +312,7 @@ fn material_for_block(block_state: &str) -> Option<Material> {
         _ => (150, 150, 150),
     };
 
-    Some(Material {
-        diffuse: Color::new(color.0, color.1, color.2, 255),
-    })
+    Some(textures.material_for(block, Color::new(color.0, color.1, color.2, 255)))
 }
 
 fn decode_varints(data: &[u8]) -> Result<Vec<i32>, String> {
