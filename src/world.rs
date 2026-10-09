@@ -1,20 +1,43 @@
 use std::collections::HashMap;
 use std::io::Read;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use flate2::read::GzDecoder;
 use raylib::prelude::*;
+use serde_json::Value;
 
-use crate::material::Material;
-use crate::material::TextureLibrary;
+use crate::material::{Material, Texture, TextureLibrary};
 use crate::ray_intersect::{RayHit, RayIntersect};
 
 pub struct VoxelWorld {
     width: usize,
     height: usize,
     length: usize,
-    blocks: Vec<Option<Material>>,
+    blocks: Vec<Option<usize>>,
+    models: Vec<VoxelBlock>,
     min: Vector3,
     max: Vector3,
+}
+
+#[derive(Clone)]
+struct VoxelBlock {
+    material: Material,
+    shapes: Vec<BlockShape>,
+    faces: Vec<ModelFace>,
+}
+
+#[derive(Clone)]
+struct ModelFace {
+    vertices: [Vector3; 4],
+    uvs: [Vector2; 4],
+    texture: Arc<Texture>,
+}
+
+#[derive(Clone)]
+enum BlockShape {
+    Box { min: Vector3, max: Vector3 },
+    FlowerCross,
 }
 
 impl VoxelWorld {
@@ -32,16 +55,32 @@ impl VoxelWorld {
             .ok_or("schematic dimensions are too large")?;
 
         let mut blocks = vec![None; block_count];
-        let texture_directory = format!(
-            "{}/textures/assets/minecraft/textures/block",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let assets_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("textures/assets/minecraft");
+        let texture_directory = assets_root.join("textures");
         let mut textures = TextureLibrary::new(texture_directory);
-        let palette = schematic
-            .palette
-            .into_iter()
-            .map(|(index, block)| (index, material_for_block(&block, &mut textures)))
-            .collect::<HashMap<_, _>>();
+        let model_library = ModelLibrary::new(assets_root);
+        let mut models = Vec::new();
+        let mut palette = HashMap::new();
+        for (palette_index, block_state) in schematic.palette {
+            let Some(material) = material_for_block(&block_state, &mut textures) else {
+                palette.insert(palette_index, None);
+                continue;
+            };
+            let faces = model_library.faces_for_block_state(&block_state, &mut textures);
+            let shapes = if faces.is_empty() {
+                shapes_for_block(&block_state)
+            } else {
+                Vec::new()
+            };
+            let model_index = models.len();
+            models.push(VoxelBlock {
+                material,
+                shapes,
+                faces,
+            });
+            palette.insert(palette_index, Some(model_index));
+        }
 
         let palette_indices = decode_varints(&schematic.block_data)?;
         if palette_indices.len() < block_count {
@@ -50,8 +89,6 @@ impl VoxelWorld {
                 palette_indices.len()
             ));
         }
-
-        // Sponge schematics store blocks with X changing first, then Z, then Y.
         for y in 0..schematic.height {
             for z in 0..schematic.length {
                 for x in 0..schematic.width {
@@ -60,7 +97,7 @@ impl VoxelWorld {
                     let world_index = schematic_index;
                     blocks[world_index] = palette
                         .get(&palette_indices[schematic_index])
-                        .cloned()
+                        .copied()
                         .flatten();
                 }
             }
@@ -82,6 +119,7 @@ impl VoxelWorld {
             height: schematic.height,
             length: schematic.length,
             blocks,
+            models,
             min,
             max,
         })
@@ -115,6 +153,552 @@ impl VoxelWorld {
     }
 }
 
+impl ModelFace {
+    fn ray_intersect(
+        &self,
+        origin: Vector3,
+        direction: Vector3,
+        cell_min: Vector3,
+    ) -> Option<(f32, Vector3, Color)> {
+        let vertices = self.vertices.map(|point| point + cell_min);
+        let mut normal = (vertices[1] - vertices[0])
+            .cross(vertices[2] - vertices[0])
+            .normalize();
+        let denominator = normal.dot(direction);
+        if denominator.abs() < f32::EPSILON {
+            return None;
+        }
+        let distance = normal.dot(vertices[0] - origin) / denominator;
+        if distance <= 0.001 {
+            return None;
+        }
+        if denominator > 0.0 {
+            normal = normal * -1.0;
+        }
+        let point = origin + direction * distance;
+        let (weights, indices) = barycentric_quad(point, vertices)?;
+        let (a, b, c) = indices;
+        let uv = Vector2::new(
+            self.uvs[a].x * weights[0] + self.uvs[b].x * weights[1] + self.uvs[c].x * weights[2],
+            self.uvs[a].y * weights[0] + self.uvs[b].y * weights[1] + self.uvs[c].y * weights[2],
+        );
+        Some((distance, normal, self.texture.sample_uv(uv.x, uv.y)))
+    }
+}
+
+struct ModelLibrary {
+    assets_root: PathBuf,
+}
+
+#[derive(Default)]
+struct ResolvedModel {
+    textures: HashMap<String, String>,
+    elements: Vec<Value>,
+}
+
+#[derive(Clone)]
+struct ModelReference {
+    model: String,
+    x_rotation: f32,
+    y_rotation: f32,
+}
+
+impl ModelLibrary {
+    fn new(assets_root: PathBuf) -> Self {
+        Self { assets_root }
+    }
+
+    fn faces_for_block_state(
+        &self,
+        block_state: &str,
+        textures: &mut TextureLibrary,
+    ) -> Vec<ModelFace> {
+        let block = block_name(block_state);
+        let properties = state_properties(block_state);
+        let state_path = self
+            .assets_root
+            .join("blockstates")
+            .join(format!("{block}.json"));
+        let Ok(json_text) = std::fs::read_to_string(state_path) else {
+            return Vec::new();
+        };
+        let Ok(blockstate_json) = serde_json::from_str::<Value>(&json_text) else {
+            return Vec::new();
+        };
+
+        let references = model_references(&blockstate_json, &properties);
+        let mut faces = Vec::new();
+        for reference in references {
+            let Some(model) = self.resolve_model(&reference.model, 0) else {
+                continue;
+            };
+            for element in &model.elements {
+                faces.extend(self.element_faces(element, &model.textures, &reference, textures));
+            }
+        }
+        faces
+    }
+
+    fn resolve_model(&self, name: &str, depth: usize) -> Option<ResolvedModel> {
+        if depth > 32 {
+            return None;
+        }
+        let model_path = name.strip_prefix("minecraft:").unwrap_or(name);
+        let path = self
+            .assets_root
+            .join("models")
+            .join(format!("{model_path}.json"));
+        let json_text = std::fs::read_to_string(path).ok()?;
+        let json = serde_json::from_str::<Value>(&json_text).ok()?;
+
+        let mut resolved = json
+            .get("parent")
+            .and_then(Value::as_str)
+            .and_then(|parent| self.resolve_model(parent, depth + 1))
+            .unwrap_or_default();
+
+        if let Some(textures) = json.get("textures").and_then(Value::as_object) {
+            for (key, value) in textures {
+                if let Some(value) = value.as_str() {
+                    resolved.textures.insert(key.clone(), value.to_owned());
+                }
+            }
+        }
+        if let Some(elements) = json.get("elements").and_then(Value::as_array) {
+            resolved.elements = elements.clone();
+        }
+        Some(resolved)
+    }
+
+    fn element_faces(
+        &self,
+        element: &Value,
+        model_textures: &HashMap<String, String>,
+        reference: &ModelReference,
+        textures: &mut TextureLibrary,
+    ) -> Vec<ModelFace> {
+        let Some(from) = json_vec3(element.get("from")) else {
+            return Vec::new();
+        };
+        let Some(to) = json_vec3(element.get("to")) else {
+            return Vec::new();
+        };
+        let element_rotation = element.get("rotation");
+        let rotation_axis = element_rotation
+            .and_then(|value| value.get("axis"))
+            .and_then(Value::as_str)
+            .unwrap_or("y");
+        let rotation_angle = element_rotation
+            .and_then(|value| value.get("angle"))
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0) as f32;
+        let rotation_origin = element_rotation
+            .and_then(|value| json_vec3(value.get("origin")))
+            .unwrap_or(Vector3::new(0.5, 0.5, 0.5));
+        let rescale = element_rotation
+            .and_then(|value| value.get("rescale"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        let Some(face_values) = element.get("faces").and_then(Value::as_object) else {
+            return Vec::new();
+        };
+        let mut faces = Vec::new();
+        for (direction, face_value) in face_values {
+            let Some(texture_ref) = face_value.get("texture").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(texture_name) = resolve_texture_ref(texture_ref, model_textures) else {
+                continue;
+            };
+            let Some(texture) = textures.load_model_texture(&texture_name) else {
+                continue;
+            };
+            let Some(mut face) = make_model_face(direction, from, to, face_value, texture) else {
+                continue;
+            };
+
+            for vertex in &mut face.vertices {
+                *vertex = rotate_point(
+                    *vertex,
+                    rotation_origin,
+                    rotation_axis,
+                    rotation_angle,
+                    rescale,
+                );
+                *vertex = rotate_point(
+                    *vertex,
+                    Vector3::new(0.5, 0.5, 0.5),
+                    "x",
+                    reference.x_rotation,
+                    false,
+                );
+                *vertex = rotate_point(
+                    *vertex,
+                    Vector3::new(0.5, 0.5, 0.5),
+                    "y",
+                    reference.y_rotation,
+                    false,
+                );
+            }
+            faces.push(face);
+        }
+        faces
+    }
+}
+
+fn block_name(block_state: &str) -> &str {
+    block_state
+        .strip_prefix("minecraft:")
+        .unwrap_or(block_state)
+        .split('[')
+        .next()
+        .unwrap_or(block_state)
+}
+
+fn state_properties(block_state: &str) -> HashMap<String, String> {
+    let Some((_, states)) = block_state.split_once('[') else {
+        return HashMap::new();
+    };
+    states
+        .trim_end_matches(']')
+        .split(',')
+        .filter_map(|state| {
+            let (key, value) = state.split_once('=')?;
+            Some((key.to_owned(), value.to_owned()))
+        })
+        .collect()
+}
+
+fn model_references(
+    blockstate: &Value,
+    properties: &HashMap<String, String>,
+) -> Vec<ModelReference> {
+    let mut references = Vec::new();
+    if let Some(variants) = blockstate.get("variants").and_then(Value::as_object) {
+        let mut matching = variants
+            .iter()
+            .filter(|(variant, _)| variant_matches(variant, properties))
+            .collect::<Vec<_>>();
+        matching.sort_by_key(|(variant, _)| std::cmp::Reverse(variant.split(',').count()));
+        if let Some((_, choice)) = matching.first() {
+            append_model_references(choice, &mut references);
+        }
+    }
+
+    if let Some(parts) = blockstate.get("multipart").and_then(Value::as_array) {
+        for part in parts {
+            let matches = part
+                .get("when")
+                .is_none_or(|when| when_matches(when, properties));
+            if matches {
+                if let Some(apply) = part.get("apply") {
+                    append_model_references(apply, &mut references);
+                }
+            }
+        }
+    }
+    references
+}
+
+fn append_model_references(value: &Value, references: &mut Vec<ModelReference>) {
+    let values = value
+        .as_array()
+        .map_or_else(|| vec![value], |items| items.iter().collect());
+    for value in values {
+        if let Some(model) = value.get("model").and_then(Value::as_str) {
+            references.push(ModelReference {
+                model: model.to_owned(),
+                x_rotation: value.get("x").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+                y_rotation: value.get("y").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+            });
+        }
+    }
+}
+
+fn variant_matches(variant: &str, properties: &HashMap<String, String>) -> bool {
+    if variant.is_empty() {
+        return true;
+    }
+    variant.split(',').all(|condition| {
+        let Some((key, expected)) = condition.split_once('=') else {
+            return false;
+        };
+        properties
+            .get(key)
+            .is_some_and(|actual| expected.split('|').any(|choice| choice == actual))
+    })
+}
+
+fn when_matches(when: &Value, properties: &HashMap<String, String>) -> bool {
+    if let Some(options) = when.get("OR").and_then(Value::as_array) {
+        return options
+            .iter()
+            .any(|option| when_matches(option, properties));
+    }
+    when.as_object().is_some_and(|conditions| {
+        conditions.iter().all(|(key, value)| {
+            let Some(expected) = value.as_str() else {
+                return false;
+            };
+            properties
+                .get(key)
+                .is_some_and(|actual| expected.split('|').any(|choice| choice == actual))
+        })
+    })
+}
+
+fn resolve_texture_ref(texture_ref: &str, textures: &HashMap<String, String>) -> Option<String> {
+    let mut current = texture_ref;
+    for _ in 0..32 {
+        if let Some(name) = current.strip_prefix('#') {
+            current = textures.get(name)?;
+        } else {
+            return Some(current.to_owned());
+        }
+    }
+    None
+}
+
+fn json_vec3(value: Option<&Value>) -> Option<Vector3> {
+    let values = value?.as_array()?;
+    Some(Vector3::new(
+        values.first()?.as_f64()? as f32 / 16.0,
+        values.get(1)?.as_f64()? as f32 / 16.0,
+        values.get(2)?.as_f64()? as f32 / 16.0,
+    ))
+}
+
+fn make_model_face(
+    direction: &str,
+    low: Vector3,
+    high: Vector3,
+    face_json: &Value,
+    texture: Arc<Texture>,
+) -> Option<ModelFace> {
+    let (vertices, uv_default) = match direction {
+        "down" => (
+            [
+                Vector3::new(low.x, low.y, low.z),
+                Vector3::new(high.x, low.y, low.z),
+                Vector3::new(high.x, low.y, high.z),
+                Vector3::new(low.x, low.y, high.z),
+            ],
+            [
+                low.x * 16.0,
+                (1.0 - high.z) * 16.0,
+                high.x * 16.0,
+                (1.0 - low.z) * 16.0,
+            ],
+        ),
+        "up" => (
+            [
+                Vector3::new(low.x, high.y, high.z),
+                Vector3::new(high.x, high.y, high.z),
+                Vector3::new(high.x, high.y, low.z),
+                Vector3::new(low.x, high.y, low.z),
+            ],
+            [low.x * 16.0, low.z * 16.0, high.x * 16.0, high.z * 16.0],
+        ),
+        "north" => (
+            [
+                Vector3::new(low.x, low.y, low.z),
+                Vector3::new(low.x, high.y, low.z),
+                Vector3::new(high.x, high.y, low.z),
+                Vector3::new(high.x, low.y, low.z),
+            ],
+            [
+                (1.0 - high.x) * 16.0,
+                (1.0 - high.y) * 16.0,
+                (1.0 - low.x) * 16.0,
+                (1.0 - low.y) * 16.0,
+            ],
+        ),
+        "south" => (
+            [
+                Vector3::new(low.x, low.y, high.z),
+                Vector3::new(high.x, low.y, high.z),
+                Vector3::new(high.x, high.y, high.z),
+                Vector3::new(low.x, high.y, high.z),
+            ],
+            [
+                low.x * 16.0,
+                (1.0 - high.y) * 16.0,
+                high.x * 16.0,
+                (1.0 - low.y) * 16.0,
+            ],
+        ),
+        "west" => (
+            [
+                Vector3::new(low.x, low.y, high.z),
+                Vector3::new(low.x, high.y, high.z),
+                Vector3::new(low.x, high.y, low.z),
+                Vector3::new(low.x, low.y, low.z),
+            ],
+            [
+                low.z * 16.0,
+                (1.0 - high.y) * 16.0,
+                high.z * 16.0,
+                (1.0 - low.y) * 16.0,
+            ],
+        ),
+        "east" => (
+            [
+                Vector3::new(high.x, low.y, low.z),
+                Vector3::new(high.x, high.y, low.z),
+                Vector3::new(high.x, high.y, high.z),
+                Vector3::new(high.x, low.y, high.z),
+            ],
+            [
+                (1.0 - high.z) * 16.0,
+                (1.0 - high.y) * 16.0,
+                (1.0 - low.z) * 16.0,
+                (1.0 - low.y) * 16.0,
+            ],
+        ),
+        _ => return None,
+    };
+
+    let uv = face_json
+        .get("uv")
+        .and_then(Value::as_array)
+        .filter(|values| values.len() == 4)
+        .and_then(|values| {
+            Some([
+                values[0].as_f64()? as f32,
+                values[1].as_f64()? as f32,
+                values[2].as_f64()? as f32,
+                values[3].as_f64()? as f32,
+            ])
+        })
+        .unwrap_or(uv_default);
+    let (u1, v1, u2, v2) = (uv[0], uv[1], uv[2], uv[3]);
+    let mut uvs = match direction {
+        "down" => [
+            Vector2::new(u1, v1),
+            Vector2::new(u2, v1),
+            Vector2::new(u2, v2),
+            Vector2::new(u1, v2),
+        ],
+        "up" => [
+            Vector2::new(u1, v2),
+            Vector2::new(u2, v2),
+            Vector2::new(u2, v1),
+            Vector2::new(u1, v1),
+        ],
+        "north" => [
+            Vector2::new(u1, v2),
+            Vector2::new(u1, v1),
+            Vector2::new(u2, v1),
+            Vector2::new(u2, v2),
+        ],
+        "south" => [
+            Vector2::new(u2, v2),
+            Vector2::new(u1, v2),
+            Vector2::new(u1, v1),
+            Vector2::new(u2, v1),
+        ],
+        "west" => [
+            Vector2::new(u2, v2),
+            Vector2::new(u2, v1),
+            Vector2::new(u1, v1),
+            Vector2::new(u1, v2),
+        ],
+        "east" => [
+            Vector2::new(u1, v2),
+            Vector2::new(u1, v1),
+            Vector2::new(u2, v1),
+            Vector2::new(u2, v2),
+        ],
+        _ => unreachable!(),
+    };
+    let turns = face_json
+        .get("rotation")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .saturating_div(90) as usize
+        % 4;
+    uvs.rotate_left(turns);
+
+    Some(ModelFace {
+        vertices,
+        uvs,
+        texture,
+    })
+}
+
+fn rotate_point(
+    point: Vector3,
+    origin: Vector3,
+    axis: &str,
+    angle_degrees: f32,
+    rescale: bool,
+) -> Vector3 {
+    if angle_degrees == 0.0 {
+        return point;
+    }
+    let radians = angle_degrees.to_radians();
+    let (sin, cos) = radians.sin_cos();
+    let mut p = point - origin;
+    if rescale {
+        let factor = 1.0 / cos.abs().max(0.0001);
+        match axis {
+            "x" => {
+                p.y *= factor;
+                p.z *= factor;
+            }
+            "y" => {
+                p.x *= factor;
+                p.z *= factor;
+            }
+            "z" => {
+                p.x *= factor;
+                p.y *= factor;
+            }
+            _ => {}
+        }
+    }
+    let rotated = match axis {
+        "x" => Vector3::new(p.x, cos * p.y - sin * p.z, sin * p.y + cos * p.z),
+        // Minecraft's positive block-state Y rotation turns north toward east.
+        "y" => Vector3::new(cos * p.x - sin * p.z, p.y, sin * p.x + cos * p.z),
+        "z" => Vector3::new(cos * p.x - sin * p.y, sin * p.x + cos * p.y, p.z),
+        _ => p,
+    };
+    rotated + origin
+}
+
+fn barycentric_quad(
+    point: Vector3,
+    vertices: [Vector3; 4],
+) -> Option<([f32; 3], (usize, usize, usize))> {
+    triangle_barycentric(point, vertices[0], vertices[1], vertices[2])
+        .map(|weights| (weights, (0, 1, 2)))
+        .or_else(|| {
+            triangle_barycentric(point, vertices[0], vertices[2], vertices[3])
+                .map(|weights| (weights, (0, 2, 3)))
+        })
+}
+
+fn triangle_barycentric(point: Vector3, a: Vector3, b: Vector3, c: Vector3) -> Option<[f32; 3]> {
+    let v0 = b - a;
+    let v1 = c - a;
+    let v2 = point - a;
+    let d00 = v0.dot(v0);
+    let d01 = v0.dot(v1);
+    let d11 = v1.dot(v1);
+    let d20 = v2.dot(v0);
+    let d21 = v2.dot(v1);
+    let denominator = d00 * d11 - d01 * d01;
+    if denominator.abs() < f32::EPSILON {
+        return None;
+    }
+    let v = (d11 * d20 - d01 * d21) / denominator;
+    let w = (d00 * d21 - d01 * d20) / denominator;
+    let u = 1.0 - v - w;
+    (u >= -0.0001 && v >= -0.0001 && w >= -0.0001).then_some([u, v, w])
+}
+
 impl RayIntersect for VoxelWorld {
     fn ray_intersect(&self, ray_origin: &Vector3, ray_direction: &Vector3) -> Option<RayHit> {
         let (entry, exit) = ray_box_interval(*ray_origin, *ray_direction, self.min, self.max)?;
@@ -142,24 +726,68 @@ impl RayIntersect for VoxelWorld {
         let mut entered_at = start_distance;
 
         while let Some(index) = self.index(x, y, z) {
-            if let Some(material) = &self.blocks[index] {
-                let position = Vector3::new(
-                    ray_origin.x + ray_direction.x * entered_at,
-                    ray_origin.y + ray_direction.y * entered_at,
-                    ray_origin.z + ray_direction.z * entered_at,
-                );
+            let cell_exit = next_x.min(next_y).min(next_z).min(exit);
+            if let Some(model_index) = self.blocks[index] {
+                let block = &self.models[model_index];
                 let cell_min = Vector3::new(
                     self.min.x + x as f32,
                     self.min.y + y as f32,
                     self.min.z + z as f32,
                 );
-                let normal = voxel_face_normal(position, cell_min);
-                return Some(RayHit {
-                    material: material.clone(),
-                    distance: entered_at,
-                    position,
-                    normal,
-                });
+                let mut closest_hit: Option<RayHit> = None;
+                for face in &block.faces {
+                    if let Some((distance, normal, color)) =
+                        face.ray_intersect(*ray_origin, *ray_direction, cell_min)
+                    {
+                        if distance + 0.0001 >= entered_at
+                            && distance <= cell_exit + 0.0001
+                            && closest_hit
+                                .as_ref()
+                                .is_none_or(|hit| distance < hit.distance)
+                        {
+                            let position = Vector3::new(
+                                ray_origin.x + ray_direction.x * distance,
+                                ray_origin.y + ray_direction.y * distance,
+                                ray_origin.z + ray_direction.z * distance,
+                            );
+                            closest_hit = Some(RayHit {
+                                material: block.material.clone(),
+                                distance,
+                                position,
+                                normal,
+                                color: Some(color),
+                            });
+                        }
+                    }
+                }
+                for shape in &block.shapes {
+                    if let Some((distance, normal)) =
+                        shape.ray_intersect(*ray_origin, *ray_direction, cell_min)
+                    {
+                        if distance + 0.0001 >= entered_at
+                            && distance <= cell_exit + 0.0001
+                            && closest_hit
+                                .as_ref()
+                                .is_none_or(|hit| distance < hit.distance)
+                        {
+                            let position = Vector3::new(
+                                ray_origin.x + ray_direction.x * distance,
+                                ray_origin.y + ray_direction.y * distance,
+                                ray_origin.z + ray_direction.z * distance,
+                            );
+                            closest_hit = Some(RayHit {
+                                material: block.material.clone(),
+                                distance,
+                                position,
+                                normal,
+                                color: None,
+                            });
+                        }
+                    }
+                }
+                if closest_hit.is_some() {
+                    return closest_hit;
+                }
             }
 
             if next_x <= next_y && next_x <= next_z {
@@ -185,34 +813,120 @@ impl RayIntersect for VoxelWorld {
     }
 }
 
-fn voxel_face_normal(position: Vector3, cell_min: Vector3) -> Vector3 {
-    let local = Vector3::new(
-        position.x - cell_min.x,
-        position.y - cell_min.y,
-        position.z - cell_min.z,
-    );
-    let distances = [
-        local.x,
-        1.0 - local.x,
-        local.y,
-        1.0 - local.y,
-        local.z,
-        1.0 - local.z,
-    ];
-    let face = distances
-        .iter()
-        .enumerate()
-        .min_by(|(_, a), (_, b)| a.total_cmp(b))
-        .map(|(index, _)| index)
-        .unwrap_or(0);
-    [
-        Vector3::new(-1.0, 0.0, 0.0),
-        Vector3::new(1.0, 0.0, 0.0),
-        Vector3::new(0.0, -1.0, 0.0),
-        Vector3::new(0.0, 1.0, 0.0),
-        Vector3::new(0.0, 0.0, -1.0),
-        Vector3::new(0.0, 0.0, 1.0),
-    ][face]
+impl BlockShape {
+    fn ray_intersect(
+        &self,
+        origin: Vector3,
+        direction: Vector3,
+        cell_min: Vector3,
+    ) -> Option<(f32, Vector3)> {
+        match self {
+            Self::Box { min, max } => {
+                ray_aabb_hit(origin, direction, cell_min + *min, cell_min + *max)
+            }
+            Self::FlowerCross => {
+                let local_origin = origin - cell_min;
+                let planes = [
+                    (Vector3::new(1.0, 0.0, -1.0), 0.0),
+                    (Vector3::new(1.0, 0.0, 1.0), 1.0),
+                ];
+                planes
+                    .into_iter()
+                    .filter_map(|(normal, offset)| {
+                        let denominator = normal.dot(direction);
+                        if denominator.abs() < f32::EPSILON {
+                            return None;
+                        }
+                        let distance = (offset - normal.dot(local_origin)) / denominator;
+                        if distance <= 0.001 {
+                            return None;
+                        }
+                        let point = local_origin + direction * distance;
+                        if point.x < 0.0
+                            || point.x > 1.0
+                            || point.y < 0.0
+                            || point.y > 1.0
+                            || point.z < 0.0
+                            || point.z > 1.0
+                        {
+                            return None;
+                        }
+                        Some((distance, normal.normalize()))
+                    })
+                    .min_by(|left, right| left.0.total_cmp(&right.0))
+            }
+        }
+    }
+}
+
+fn ray_aabb_hit(
+    origin: Vector3,
+    direction: Vector3,
+    min: Vector3,
+    max: Vector3,
+) -> Option<(f32, Vector3)> {
+    let mut near = f32::NEG_INFINITY;
+    let mut far = f32::INFINITY;
+    let mut near_normal = Vector3::zero();
+    let mut far_normal = Vector3::zero();
+    for (o, d, lo, hi, negative_normal, positive_normal) in [
+        (
+            origin.x,
+            direction.x,
+            min.x,
+            max.x,
+            Vector3::new(-1.0, 0.0, 0.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        ),
+        (
+            origin.y,
+            direction.y,
+            min.y,
+            max.y,
+            Vector3::new(0.0, -1.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+        ),
+        (
+            origin.z,
+            direction.z,
+            min.z,
+            max.z,
+            Vector3::new(0.0, 0.0, -1.0),
+            Vector3::new(0.0, 0.0, 1.0),
+        ),
+    ] {
+        if d.abs() < f32::EPSILON {
+            if o < lo || o > hi {
+                return None;
+            }
+            continue;
+        }
+        let mut first = (lo - o) / d;
+        let mut second = (hi - o) / d;
+        let (mut first_normal, mut second_normal) = (negative_normal, positive_normal);
+        if first > second {
+            std::mem::swap(&mut first, &mut second);
+            std::mem::swap(&mut first_normal, &mut second_normal);
+        }
+        if first > near {
+            near = first;
+            near_normal = first_normal;
+        }
+        if second < far {
+            far = second;
+            far_normal = second_normal;
+        }
+        if near > far {
+            return None;
+        }
+    }
+    if near > 0.001 {
+        Some((near, near_normal))
+    } else if far > 0.001 {
+        Some((far, far_normal))
+    } else {
+        None
+    }
 }
 
 fn grid_step(origin: f32, direction: f32, minimum: f32, cell: isize) -> (isize, f32, f32) {
@@ -316,6 +1030,172 @@ fn material_for_block(block_state: &str, textures: &mut TextureLibrary) -> Optio
     };
 
     Some(textures.material_for(block, Color::new(color.0, color.1, color.2, 255)))
+}
+
+fn shapes_for_block(block_state: &str) -> Vec<BlockShape> {
+    let block = block_state
+        .strip_prefix("minecraft:")
+        .unwrap_or(block_state)
+        .split('[')
+        .next()
+        .unwrap_or(block_state);
+    let full = || vec![box_shape(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)];
+
+    match block {
+        "lantern" => {
+            let hanging = state_value(block_state, "hanging") == Some("true");
+            let body_bottom = if hanging { 0.0 } else { 0.0 };
+            let mut shapes = vec![
+                box_shape(
+                    5.0 / 16.0,
+                    body_bottom,
+                    5.0 / 16.0,
+                    11.0 / 16.0,
+                    7.0 / 16.0,
+                    11.0 / 16.0,
+                ),
+                box_shape(
+                    6.0 / 16.0,
+                    7.0 / 16.0,
+                    6.0 / 16.0,
+                    10.0 / 16.0,
+                    9.0 / 16.0,
+                    10.0 / 16.0,
+                ),
+            ];
+            if hanging {
+                shapes.push(box_shape(
+                    7.0 / 16.0,
+                    9.0 / 16.0,
+                    7.0 / 16.0,
+                    9.0 / 16.0,
+                    1.0,
+                    9.0 / 16.0,
+                ));
+            } else {
+                shapes.push(box_shape(
+                    7.0 / 16.0,
+                    9.0 / 16.0,
+                    7.0 / 16.0,
+                    9.0 / 16.0,
+                    11.0 / 16.0,
+                    9.0 / 16.0,
+                ));
+            }
+            shapes
+        }
+        "azure_bluet" | "dandelion" | "lily_of_the_valley" | "grass" => {
+            vec![BlockShape::FlowerCross]
+        }
+        "iron_bars" => {
+            let mut shapes = vec![box_shape(
+                7.0 / 16.0,
+                0.0,
+                7.0 / 16.0,
+                9.0 / 16.0,
+                1.0,
+                9.0 / 16.0,
+            )];
+            if state_value(block_state, "north") == Some("true") {
+                shapes.push(box_shape(7.0 / 16.0, 0.0, 0.0, 9.0 / 16.0, 1.0, 0.5));
+            }
+            if state_value(block_state, "south") == Some("true") {
+                shapes.push(box_shape(7.0 / 16.0, 0.0, 0.5, 9.0 / 16.0, 1.0, 1.0));
+            }
+            if state_value(block_state, "west") == Some("true") {
+                shapes.push(box_shape(0.0, 0.0, 7.0 / 16.0, 0.5, 1.0, 9.0 / 16.0));
+            }
+            if state_value(block_state, "east") == Some("true") {
+                shapes.push(box_shape(0.5, 0.0, 7.0 / 16.0, 1.0, 1.0, 9.0 / 16.0));
+            }
+            shapes
+        }
+        block if block.ends_with("_trapdoor") => {
+            let thickness = 3.0 / 16.0;
+            if state_value(block_state, "open") == Some("true") {
+                match state_value(block_state, "facing") {
+                    Some("north") => vec![box_shape(0.0, 0.0, 0.0, 1.0, 1.0, thickness)],
+                    Some("south") => vec![box_shape(0.0, 0.0, 1.0 - thickness, 1.0, 1.0, 1.0)],
+                    Some("west") => vec![box_shape(0.0, 0.0, 0.0, thickness, 1.0, 1.0)],
+                    Some("east") => vec![box_shape(1.0 - thickness, 0.0, 0.0, 1.0, 1.0, 1.0)],
+                    _ => full(),
+                }
+            } else if state_value(block_state, "half") == Some("top") {
+                vec![box_shape(0.0, 1.0 - thickness, 0.0, 1.0, 1.0, 1.0)]
+            } else {
+                vec![box_shape(0.0, 0.0, 0.0, 1.0, thickness, 1.0)]
+            }
+        }
+        block if block.ends_with("_door") => {
+            let thickness = 3.0 / 16.0;
+            match state_value(block_state, "facing") {
+                Some("north") => vec![box_shape(0.0, 0.0, 0.0, 1.0, 1.0, thickness)],
+                Some("south") => vec![box_shape(0.0, 0.0, 1.0 - thickness, 1.0, 1.0, 1.0)],
+                Some("west") => vec![box_shape(0.0, 0.0, 0.0, thickness, 1.0, 1.0)],
+                Some("east") => vec![box_shape(1.0 - thickness, 0.0, 0.0, 1.0, 1.0, 1.0)],
+                _ => full(),
+            }
+        }
+        "candle" => vec![box_shape(
+            7.0 / 16.0,
+            0.0,
+            7.0 / 16.0,
+            9.0 / 16.0,
+            7.0 / 16.0,
+            9.0 / 16.0,
+        )],
+        "wall_torch" => match state_value(block_state, "facing") {
+            Some("north") => vec![box_shape(
+                6.0 / 16.0,
+                3.0 / 16.0,
+                8.0 / 16.0,
+                10.0 / 16.0,
+                13.0 / 16.0,
+                1.0,
+            )],
+            Some("south") => vec![box_shape(
+                6.0 / 16.0,
+                3.0 / 16.0,
+                0.0,
+                10.0 / 16.0,
+                13.0 / 16.0,
+                8.0 / 16.0,
+            )],
+            Some("west") => vec![box_shape(
+                8.0 / 16.0,
+                3.0 / 16.0,
+                6.0 / 16.0,
+                1.0,
+                13.0 / 16.0,
+                10.0 / 16.0,
+            )],
+            Some("east") => vec![box_shape(
+                0.0,
+                3.0 / 16.0,
+                6.0 / 16.0,
+                8.0 / 16.0,
+                13.0 / 16.0,
+                10.0 / 16.0,
+            )],
+            _ => full(),
+        },
+        _ => full(),
+    }
+}
+
+fn box_shape(min_x: f32, min_y: f32, min_z: f32, max_x: f32, max_y: f32, max_z: f32) -> BlockShape {
+    BlockShape::Box {
+        min: Vector3::new(min_x, min_y, min_z),
+        max: Vector3::new(max_x, max_y, max_z),
+    }
+}
+
+fn state_value<'a>(block_state: &'a str, name: &str) -> Option<&'a str> {
+    let states = block_state.split_once('[')?.1.strip_suffix(']')?;
+    states.split(',').find_map(|state| {
+        let (key, value) = state.split_once('=')?;
+        (key == name).then_some(value)
+    })
 }
 
 fn decode_varints(data: &[u8]) -> Result<Vec<i32>, String> {

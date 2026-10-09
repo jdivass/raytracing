@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 use raylib::prelude::*;
+use rayon::prelude::*;
 use std::f32::consts::PI;
 
 mod camera;
@@ -18,46 +19,66 @@ use world::VoxelWorld;
 
 pub fn cast_ray(ray_origin: &Vector3, ray_direction: &Vector3, world: &VoxelWorld) -> Color {
     let sky = Color::new(85, 142, 212, 255);
-    world
-        .ray_intersect(ray_origin, ray_direction)
-        .map_or(sky, |hit| {
-            let color = hit.material.color_at(hit.position, hit.normal);
-            if color.a == 255 {
-                return color;
-            }
+    let mut origin = *ray_origin;
+    let mut accumulated = [0.0_f32; 3];
+    let mut transmittance = 1.0_f32;
 
-            let alpha = color.a as f32 / 255.0;
-            Color::new(
-                (color.r as f32 * alpha + sky.r as f32 * (1.0 - alpha)) as u8,
-                (color.g as f32 * alpha + sky.g as f32 * (1.0 - alpha)) as u8,
-                (color.b as f32 * alpha + sky.b as f32 * (1.0 - alpha)) as u8,
-                255,
-            )
-        })
+    for _ in 0..32 {
+        let Some(hit) = world.ray_intersect(&origin, ray_direction) else {
+            break;
+        };
+        let color = hit
+            .color
+            .unwrap_or_else(|| hit.material.color_at(hit.position, hit.normal));
+        let alpha = color.a as f32 / 255.0;
+        accumulated[0] += color.r as f32 * alpha * transmittance;
+        accumulated[1] += color.g as f32 * alpha * transmittance;
+        accumulated[2] += color.b as f32 * alpha * transmittance;
+        transmittance *= 1.0 - alpha;
+        if transmittance < 0.01 {
+            break;
+        }
+        origin = hit.position + *ray_direction * 0.002;
+    }
+
+    Color::new(
+        (accumulated[0] + sky.r as f32 * transmittance) as u8,
+        (accumulated[1] + sky.g as f32 * transmittance) as u8,
+        (accumulated[2] + sky.b as f32 * transmittance) as u8,
+        255,
+    )
 }
 
 pub fn render(framebuffer: &mut Framebuffer, world: &VoxelWorld, camera: &Camera) {
-    let width = framebuffer.width as f32;
-    let height = framebuffer.height as f32;
+    let width_px = framebuffer.width as usize;
+    let height_px = framebuffer.height as usize;
+    if width_px == 0 || height_px == 0 {
+        return;
+    }
+
+    let width = width_px as f32;
+    let height = height_px as f32;
     let fov = PI / 3.0;
     let aspect_ratio = width / height;
     let perspective_scale = (fov / 2.0).tan();
 
-    for y in 0..framebuffer.height {
-        for x in 0..framebuffer.width {
-            let screen_x = (2.0 * x as f32) / width - 1.0; // 0 .. 1
-            // Framebuffer Y grows downward, while the camera's up vector grows upward.
-            let screen_y = 1.0 - (2.0 * y as f32) / height;
+    let mut pixels = vec![Color::BLACK; width_px * height_px];
+    pixels
+        .par_chunks_mut(width_px)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for (x, pixel) in row.iter_mut().enumerate() {
+                let screen_x = (2.0 * x as f32) / width - 1.0;
+                let screen_y = 1.0 - (2.0 * y as f32) / height;
+                let screen_x = screen_x * aspect_ratio * perspective_scale;
+                let screen_y = screen_y * perspective_scale;
+                let ray_direction = camera.ray_direction(screen_x, screen_y);
+                *pixel = cast_ray(&camera.position, &ray_direction, world);
+            }
+        });
 
-            let screen_x = screen_x * aspect_ratio * perspective_scale;
-            let screen_y = screen_y * perspective_scale;
-
-            let ray_direction = camera.ray_direction(screen_x, screen_y);
-
-            let pixel_color = cast_ray(&camera.position, &ray_direction, world);
-            framebuffer.set_current_color(pixel_color);
-            framebuffer.set_pixel(x, y)
-        }
+    for (index, color) in pixels.into_iter().enumerate() {
+        framebuffer.set_pixel_color((index % width_px) as u32, (index / width_px) as u32, color);
     }
 }
 
@@ -73,8 +94,6 @@ fn main() {
         .build();
     window.disable_cursor();
 
-    // Fullscreen can be larger than the requested startup size.  Render at
-    // the actual back-buffer resolution so the texture covers the whole view.
     let mut framebuffer = Framebuffer::new(
         window.get_render_width() as u32,
         window.get_render_height() as u32,

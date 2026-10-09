@@ -71,6 +71,7 @@ impl RayIntersect for Cube {
             distance: t,
             position,
             normal,
+            color: None,
         })
     }
 }

@@ -41,6 +41,12 @@ impl Framebuffer {
         }
     }
 
+    pub fn set_pixel_color(&mut self, x: u32, y: u32, color: Color) {
+        if x < self.width && y < self.height {
+            self.color_buffer.draw_pixel(x as i32, y as i32, color);
+        }
+    }
+
     pub fn swap_buffers(&self, window: &mut RaylibHandle, raylib_thread: &RaylibThread) {
         if let Ok(texture) = window.load_texture_from_image(raylib_thread, &self.color_buffer) {
             let mut renderer = window.begin_drawing(raylib_thread);

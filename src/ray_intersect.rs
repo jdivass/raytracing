@@ -6,6 +6,7 @@ pub struct RayHit {
     pub distance: f32,
     pub position: Vector3,
     pub normal: Vector3,
+    pub color: Option<Color>,
 }
 
 pub trait RayIntersect {

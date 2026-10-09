@@ -1,23 +1,23 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use raylib::prelude::*;
 
 #[derive(Clone)]
 pub struct Material {
     pub diffuse: Color,
-    textures: Option<Rc<BlockTextures>>,
+    textures: Option<Arc<BlockTextures>>,
 }
 
 #[derive(Clone)]
 pub(crate) struct BlockTextures {
-    side: Rc<Texture>,
-    top: Rc<Texture>,
-    bottom: Rc<Texture>,
+    side: Arc<Texture>,
+    top: Arc<Texture>,
+    bottom: Arc<Texture>,
 }
 
-struct Texture {
+pub(crate) struct Texture {
     width: i32,
     height: i32,
     pixels: Vec<Color>,
@@ -25,7 +25,7 @@ struct Texture {
 
 pub struct TextureLibrary {
     directory: PathBuf,
-    cache: HashMap<String, Option<Rc<Texture>>>,
+    cache: HashMap<String, Option<Arc<Texture>>>,
 }
 
 impl Material {
@@ -39,7 +39,7 @@ impl Material {
     fn textured(diffuse: Color, textures: BlockTextures) -> Self {
         Self {
             diffuse,
-            textures: Some(Rc::new(textures)),
+            textures: Some(Arc::new(textures)),
         }
     }
 
@@ -87,41 +87,57 @@ impl TextureLibrary {
         Material::textured(fallback, BlockTextures { side, top, bottom })
     }
 
-    fn first_existing(&mut self, names: &[&str]) -> Option<Rc<Texture>> {
+    fn first_existing(&mut self, names: &[&str]) -> Option<Arc<Texture>> {
         names.iter().find_map(|name| self.load(name))
     }
 
-    fn load(&mut self, name: &str) -> Option<Rc<Texture>> {
-        if let Some(texture) = self.cache.get(name) {
+    fn load(&mut self, name: &str) -> Option<Arc<Texture>> {
+        let resource = name.strip_prefix("minecraft:").unwrap_or(name);
+        let resource = if resource.contains('/') {
+            resource.to_owned()
+        } else {
+            format!("block/{resource}")
+        };
+        if let Some(texture) = self.cache.get(&resource) {
             return texture.clone();
         }
 
-        let path = self.directory.join(format!("{name}.png"));
-        // Avoid sending expected lookup misses through Raylib's file loader,
-        // which emits a warning for every absent optional face variant.
+        let path = self.directory.join(format!("{resource}.png"));
         if !path.is_file() {
-            self.cache.insert(name.to_owned(), None);
+            self.cache.insert(resource, None);
             return None;
         }
         let texture = load_texture(&path);
-        self.cache.insert(name.to_owned(), texture.clone());
+        self.cache.insert(resource, texture.clone());
         texture
+    }
+
+    pub(crate) fn load_model_texture(&mut self, name: &str) -> Option<Arc<Texture>> {
+        self.load(name)
     }
 }
 
 impl Texture {
+    pub(crate) fn sample_uv(&self, u: f32, v: f32) -> Color {
+        let u = u.rem_euclid(16.0).min(15.9999);
+        let v = v.rem_euclid(16.0).min(15.9999);
+        let x = (u / 16.0 * self.width as f32).floor() as i32;
+        let y = (v / 16.0 * self.height as f32).floor() as i32;
+        self.pixels
+            [(y.clamp(0, self.height - 1) * self.width + x.clamp(0, self.width - 1)) as usize]
+    }
+
     fn sample(&self, u: f32, v: f32) -> Color {
         let u = u.rem_euclid(1.0);
         let v = v.rem_euclid(1.0);
         let x = (u * self.width as f32).floor() as i32;
-        // Texture images use a downward-growing Y axis.
         let y = ((1.0 - v.rem_euclid(1.0)) * self.height as f32).floor() as i32;
         self.pixels
             [(y.clamp(0, self.height - 1) * self.width + x.clamp(0, self.width - 1)) as usize]
     }
 }
 
-fn load_texture(path: &Path) -> Option<Rc<Texture>> {
+fn load_texture(path: &Path) -> Option<Arc<Texture>> {
     let image = Image::load_image(path.to_str()?).ok()?;
     let width = image.width();
     let height = image.height();
@@ -135,7 +151,7 @@ fn load_texture(path: &Path) -> Option<Rc<Texture>> {
             pixels.push(image.get_color(x, y));
         }
     }
-    Some(Rc::new(Texture {
+    Some(Arc::new(Texture {
         width,
         height,
         pixels,
