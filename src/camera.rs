@@ -21,6 +21,18 @@ impl Camera {
         }
     }
 
+    pub fn looking_at(position: Vector3, target: Vector3) -> Self {
+        let mut camera = Self::new(position);
+        let offset_x = target.x - position.x;
+        let offset_y = target.y - position.y;
+        let offset_z = target.z - position.z;
+        let horizontal_distance = offset_x.hypot(offset_z);
+
+        camera.yaw = offset_z.atan2(offset_x);
+        camera.pitch = offset_y.atan2(horizontal_distance);
+        camera
+    }
+
     pub fn update(&mut self, window: &RaylibHandle, delta_time: f32) {
         let mouse_delta = window.get_mouse_delta();
         self.yaw += mouse_delta.x * self.mouse_sensitivity;

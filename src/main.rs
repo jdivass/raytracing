@@ -9,30 +9,23 @@ mod cube;
 mod framebuffer;
 mod material;
 mod ray_intersect;
+mod world;
 
 use camera::Camera;
-use cube::Cube;
 use framebuffer::Framebuffer;
 use material::Material;
 use ray_intersect::RayIntersect;
+use world::VoxelWorld;
 
-pub fn cast_ray(ray_origin: &Vector3, ray_direction: &Vector3, objects: &[Cube]) -> Color {
-    let mut closest_t = f32::INFINITY;
-    let mut closest_color = Color::new(4, 12, 36, 255);
-
-    for object in objects {
-        if let Some((material, t)) = object.ray_intersect(ray_origin, ray_direction) {
-            if t < closest_t {
-                closest_t = t;
-                closest_color = material.diffuse;
-            }
-        }
-    }
-
-    closest_color
+pub fn cast_ray(ray_origin: &Vector3, ray_direction: &Vector3, world: &VoxelWorld) -> Color {
+    world
+        .ray_intersect(ray_origin, ray_direction)
+        .map_or(Color::new(85, 142, 212, 255), |(material, _)| {
+            material.diffuse
+        })
 }
 
-pub fn render(framebuffer: &mut Framebuffer, objects: &[Cube], camera: &Camera) {
+pub fn render(framebuffer: &mut Framebuffer, world: &VoxelWorld, camera: &Camera) {
     let width = framebuffer.width as f32;
     let height = framebuffer.height as f32;
     let fov = PI / 3.0;
@@ -42,14 +35,15 @@ pub fn render(framebuffer: &mut Framebuffer, objects: &[Cube], camera: &Camera) 
     for y in 0..framebuffer.height {
         for x in 0..framebuffer.width {
             let screen_x = (2.0 * x as f32) / width - 1.0; // 0 .. 1
-            let screen_y = (2.0 * y as f32) / height - 1.0;
+            // Framebuffer Y grows downward, while the camera's up vector grows upward.
+            let screen_y = 1.0 - (2.0 * y as f32) / height;
 
             let screen_x = screen_x * aspect_ratio * perspective_scale;
             let screen_y = screen_y * perspective_scale;
 
             let ray_direction = camera.ray_direction(screen_x, screen_y);
 
-            let pixel_color = cast_ray(&camera.position, &ray_direction, objects);
+            let pixel_color = cast_ray(&camera.position, &ray_direction, world);
             framebuffer.set_current_color(pixel_color);
             framebuffer.set_pixel(x, y)
         }
@@ -77,48 +71,15 @@ fn main() {
 
     framebuffer.set_background_color(Color::new(80, 80, 200, 255));
 
-    let wood = Material {
-        diffuse: Color::new(110, 38, 14, 255),
-    };
-
-    let buttons = Material {
-        diffuse: Color::new(0, 0, 0, 255),
-    };
-
-    let paws = Material {
-        diffuse: Color::new(225, 193, 110, 255),
-    };
-
-    let nose = Material {
-        diffuse: Color::new(128, 0, 0, 255),
-    };
-
-    let objects = [
-        Cube::new(Vector3::new(0.0, -1.5, -5.0), 1.6, wood),
-        Cube::new(Vector3::new(0.0, 0.0, -5.0), 2.0, wood),
-        Cube::new(Vector3::new(0.5, -1.8, -4.1), 0.7, wood),
-        Cube::new(Vector3::new(-0.5, -1.8, -4.1), 0.7, wood),
-        Cube::new(Vector3::new(0.2, -1.42, -4.1), 0.3, buttons),
-        Cube::new(Vector3::new(-0.2, -1.42, -4.1), 0.3, buttons),
-        Cube::new(Vector3::new(0.0, -1.10, -4.1), 0.3, nose),
-        Cube::new(Vector3::new(0.85, -0.4, -4.1), 0.7, wood),
-        Cube::new(Vector3::new(0.85, -0.4, -3.9), 0.5, paws),
-        Cube::new(Vector3::new(-0.85, -0.4, -4.1), 0.7, wood),
-        Cube::new(Vector3::new(-0.85, -0.4, -3.9), 0.5, paws),
-        Cube::new(Vector3::new(0.5, 1.0, -4.1), 0.7, wood),
-        Cube::new(Vector3::new(0.5, 0.95, -3.9), 0.5, paws),
-        Cube::new(Vector3::new(-0.5, 1.0, -4.1), 0.7, wood),
-        Cube::new(Vector3::new(-0.5, 0.95, -3.9), 0.5, paws),
-        Cube::new(Vector3::new(0.0, 0.3, -4.2), 0.4, buttons),
-        Cube::new(Vector3::new(0.0, -0.3, -4.2), 0.4, buttons),
-    ];
-    let mut camera = Camera::new(Vector3::new(0.0, 0.0, 0.0));
+    let world = VoxelWorld::from_schematic(include_bytes!("../assets/lonlonranch.schem"))
+        .expect("assets/lonlonranch.schem must be a valid Sponge schematic");
+    let mut camera = Camera::looking_at(world.camera_start(), world.camera_target());
 
     while !window.window_should_close() {
         camera.update(&window, window.get_frame_time());
         framebuffer.clear();
 
-        render(&mut framebuffer, &objects, &camera);
+        render(&mut framebuffer, &world, &camera);
 
         framebuffer.swap_buffers(&mut window, &raylib_thread);
     }
