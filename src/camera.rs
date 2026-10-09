@@ -33,8 +33,9 @@ impl Camera {
         camera
     }
 
-    pub fn update(&mut self, window: &RaylibHandle, delta_time: f32) {
+    pub fn update(&mut self, window: &RaylibHandle, delta_time: f32) -> bool {
         let mouse_delta = window.get_mouse_delta();
+        let mut moved = mouse_delta.x != 0.0 || mouse_delta.y != 0.0;
         self.yaw += mouse_delta.x * self.mouse_sensitivity;
         self.pitch = (self.pitch - mouse_delta.y * self.mouse_sensitivity)
             .clamp(-FRAC_PI_2 + 0.01, FRAC_PI_2 - 0.01);
@@ -46,27 +47,34 @@ impl Camera {
         let right_z = forward_x;
 
         if window.is_key_down(KeyboardKey::KEY_W) {
+            moved = true;
             self.position.x += forward_x * distance;
             self.position.z += forward_z * distance;
         }
         if window.is_key_down(KeyboardKey::KEY_S) {
+            moved = true;
             self.position.x -= forward_x * distance;
             self.position.z -= forward_z * distance;
         }
         if window.is_key_down(KeyboardKey::KEY_D) {
+            moved = true;
             self.position.x += right_x * distance;
             self.position.z += right_z * distance;
         }
         if window.is_key_down(KeyboardKey::KEY_A) {
+            moved = true;
             self.position.x -= right_x * distance;
             self.position.z -= right_z * distance;
         }
         if window.is_key_down(KeyboardKey::KEY_E) {
+            moved = true;
             self.position.y += distance;
         }
         if window.is_key_down(KeyboardKey::KEY_Q) {
+            moved = true;
             self.position.y -= distance;
         }
+        moved
     }
 
     pub fn ray_direction(&self, screen_x: f32, screen_y: f32) -> Vector3 {

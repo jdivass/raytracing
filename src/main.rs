@@ -4,6 +4,7 @@
 use raylib::prelude::*;
 use rayon::prelude::*;
 use std::f32::consts::PI;
+use std::time::{Duration, Instant};
 
 mod camera;
 mod cube;
@@ -98,19 +99,29 @@ fn main() {
         window.get_render_width() as u32,
         window.get_render_height() as u32,
     );
+    let mut preview_framebuffer = Framebuffer::new(
+        (window.get_render_width() as u32 / 3).max(1),
+        (window.get_render_height() as u32 / 3).max(1),
+    );
 
     framebuffer.set_background_color(Color::new(80, 80, 200, 255));
 
     let world = VoxelWorld::from_schematic(include_bytes!("../assets/lonlonranchclean.schem"))
         .expect("assets/lonlonranch.schem must be a valid Sponge schematic");
     let mut camera = Camera::looking_at(world.camera_start(), world.camera_target());
+    let mut last_camera_motion = Instant::now() - Duration::from_secs(1);
 
     while !window.window_should_close() {
-        camera.update(&window, window.get_frame_time());
-        framebuffer.clear();
+        if camera.update(&window, window.get_frame_time()) {
+            last_camera_motion = Instant::now();
+        }
 
-        render(&mut framebuffer, &world, &camera);
-
-        framebuffer.swap_buffers(&mut window, &raylib_thread);
+        if last_camera_motion.elapsed() < Duration::from_millis(180) {
+            render(&mut preview_framebuffer, &world, &camera);
+            preview_framebuffer.swap_buffers(&mut window, &raylib_thread);
+        } else {
+            render(&mut framebuffer, &world, &camera);
+            framebuffer.swap_buffers(&mut window, &raylib_thread);
+        }
     }
 }
