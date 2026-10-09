@@ -1,0 +1,10 @@
+{
+  "pack": {
+    "pack_format": 34,
+    "description": "Default template texture pack - By truyty",
+    "supported_formats": [
+      34,
+      46
+    ]
+  }
+}

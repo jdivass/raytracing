@@ -97,6 +97,12 @@ impl TextureLibrary {
         }
 
         let path = self.directory.join(format!("{name}.png"));
+        // Avoid sending expected lookup misses through Raylib's file loader,
+        // which emits a warning for every absent optional face variant.
+        if !path.is_file() {
+            self.cache.insert(name.to_owned(), None);
+            return None;
+        }
         let texture = load_texture(&path);
         self.cache.insert(name.to_owned(), texture.clone());
         texture
@@ -205,6 +211,16 @@ fn texture_names_for(block: &str) -> (String, String, String) {
             "oak_planks".into(),
             "oak_planks".into(),
         ),
+        "mushroom_stem" => (
+            "mushroom_stem".into(),
+            "mushroom_stem".into(),
+            "mushroom_stem".into(),
+        ),
+        block if block.ends_with("_stained_glass_pane") => {
+            let glass = block.trim_end_matches("_pane");
+            (glass.into(), format!("{block}_top"), format!("{block}_top"))
+        }
+        block if block.ends_with("_leaves") => (block.into(), block.into(), block.into()),
         block if block.ends_with("_door") => {
             let stem = block.trim_end_matches("_door");
             (

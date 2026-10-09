@@ -32,7 +32,10 @@ impl VoxelWorld {
             .ok_or("schematic dimensions are too large")?;
 
         let mut blocks = vec![None; block_count];
-        let texture_directory = format!("{}/textures", env!("CARGO_MANIFEST_DIR"));
+        let texture_directory = format!(
+            "{}/textures/assets/minecraft/textures/block",
+            env!("CARGO_MANIFEST_DIR")
+        );
         let mut textures = TextureLibrary::new(texture_directory);
         let palette = schematic
             .palette

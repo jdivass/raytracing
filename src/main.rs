@@ -82,7 +82,7 @@ fn main() {
 
     framebuffer.set_background_color(Color::new(80, 80, 200, 255));
 
-    let world = VoxelWorld::from_schematic(include_bytes!("../assets/lonlonranch.schem"))
+    let world = VoxelWorld::from_schematic(include_bytes!("../assets/lonlonranchclean.schem"))
         .expect("assets/lonlonranch.schem must be a valid Sponge schematic");
     let mut camera = Camera::looking_at(world.camera_start(), world.camera_target());
 
