@@ -25,6 +25,7 @@ struct VoxelBlock {
     material: Material,
     shapes: Vec<BlockShape>,
     faces: Vec<ModelFace>,
+    cube_faces: Option<[usize; 6]>,
 }
 
 #[derive(Clone)]
@@ -32,6 +33,8 @@ struct ModelFace {
     vertices: [Vector3; 4],
     uvs: [Vector2; 4],
     texture: Arc<Texture>,
+    normal: Vector3,
+    plane_d: f32,
 }
 
 #[derive(Clone)]
@@ -73,11 +76,13 @@ impl VoxelWorld {
             } else {
                 Vec::new()
             };
+            let cube_faces = cube_face_slots(&faces);
             let model_index = models.len();
             models.push(VoxelBlock {
                 material,
                 shapes,
                 faces,
+                cube_faces,
             });
             palette.insert(palette_index, Some(model_index));
         }
@@ -129,8 +134,8 @@ impl VoxelWorld {
         let largest_dimension = self.width.max(self.length) as f32;
         Vector3::new(
             0.0,
-            self.height as f32 + largest_dimension * 0.9,
-            self.max.z + largest_dimension * 0.65,
+            self.height as f32 + largest_dimension * 0.4,
+            self.max.z + largest_dimension * 0.45,
         )
     }
 
@@ -154,29 +159,38 @@ impl VoxelWorld {
 }
 
 impl ModelFace {
+    fn finalize(&mut self) -> bool {
+        let normal = (self.vertices[1] - self.vertices[0]).cross(self.vertices[2] - self.vertices[0]);
+        let length = normal.length();
+        if !(length > 1e-8) {
+            return false;
+        }
+        self.normal = normal * (1.0 / length);
+        self.plane_d = self.normal.dot(self.vertices[0]);
+        true
+    }
+
+    #[inline]
     fn ray_intersect(
         &self,
-        origin: Vector3,
+        local_origin: Vector3,
         direction: Vector3,
-        cell_min: Vector3,
     ) -> Option<(f32, Vector3, Color)> {
-        let vertices = self.vertices.map(|point| point + cell_min);
-        let mut normal = (vertices[1] - vertices[0])
-            .cross(vertices[2] - vertices[0])
-            .normalize();
-        let denominator = normal.dot(direction);
+        let denominator = self.normal.dot(direction);
         if denominator.abs() < f32::EPSILON {
             return None;
         }
-        let distance = normal.dot(vertices[0] - origin) / denominator;
+        let distance = (self.plane_d - self.normal.dot(local_origin)) / denominator;
         if distance <= 0.001 {
             return None;
         }
-        if denominator > 0.0 {
-            normal = normal * -1.0;
-        }
-        let point = origin + direction * distance;
-        let (weights, indices) = barycentric_quad(point, vertices)?;
+        let normal = if denominator > 0.0 {
+            self.normal * -1.0
+        } else {
+            self.normal
+        };
+        let point = local_origin + direction * distance;
+        let (weights, indices) = barycentric_quad(point, self.vertices)?;
         let (a, b, c) = indices;
         let uv = Vector2::new(
             self.uvs[a].x * weights[0] + self.uvs[b].x * weights[1] + self.uvs[c].x * weights[2],
@@ -184,6 +198,86 @@ impl ModelFace {
         );
         Some((distance, normal, self.texture.sample_uv(uv.x, uv.y)))
     }
+
+    #[inline]
+    fn color_at_local(&self, point: Vector3) -> Color {
+        let origin = self.vertices[0];
+        let edge_u = self.vertices[1] - origin;
+        let edge_v = self.vertices[3] - origin;
+        let offset = point - origin;
+        let s = offset.dot(edge_u) / edge_u.dot(edge_u);
+        let t = offset.dot(edge_v) / edge_v.dot(edge_v);
+        let u = self.uvs[0].x + (self.uvs[1].x - self.uvs[0].x) * s + (self.uvs[3].x - self.uvs[0].x) * t;
+        let v = self.uvs[0].y + (self.uvs[1].y - self.uvs[0].y) * s + (self.uvs[3].y - self.uvs[0].y) * t;
+        self.texture.sample_uv(u, v)
+    }
+}
+
+#[inline]
+fn axis_value(vector: Vector3, axis: usize) -> f32 {
+    match axis {
+        0 => vector.x,
+        1 => vector.y,
+        _ => vector.z,
+    }
+}
+
+#[inline]
+fn set_axis_value(vector: &mut Vector3, axis: usize, value: f32) {
+    match axis {
+        0 => vector.x = value,
+        1 => vector.y = value,
+        _ => vector.z = value,
+    }
+}
+
+fn full_face_slot(face: &ModelFace) -> Option<usize> {
+    const EPSILON: f32 = 1e-4;
+    for axis in 0..3 {
+        let plane = axis_value(face.vertices[0], axis);
+        if !face
+            .vertices
+            .iter()
+            .all(|vertex| (axis_value(*vertex, axis) - plane).abs() < EPSILON)
+        {
+            continue;
+        }
+        let side = if plane.abs() < EPSILON {
+            0
+        } else if (plane - 1.0).abs() < EPSILON {
+            1
+        } else {
+            return None;
+        };
+        for other in (0..3).filter(|other| *other != axis) {
+            let low = face
+                .vertices
+                .iter()
+                .map(|vertex| axis_value(*vertex, other))
+                .fold(f32::INFINITY, f32::min);
+            let high = face
+                .vertices
+                .iter()
+                .map(|vertex| axis_value(*vertex, other))
+                .fold(f32::NEG_INFINITY, f32::max);
+            if low.abs() > EPSILON || (high - 1.0).abs() > EPSILON {
+                return None;
+            }
+        }
+        return Some(axis * 2 + side);
+    }
+    None
+}
+
+fn cube_face_slots(faces: &[ModelFace]) -> Option<[usize; 6]> {
+    let mut slots: [Option<usize>; 6] = [None; 6];
+    for (index, face) in faces.iter().enumerate() {
+        let slot = full_face_slot(face)?;
+        slots[slot].get_or_insert(index);
+    }
+    Some([
+        slots[0]?, slots[1]?, slots[2]?, slots[3]?, slots[4]?, slots[5]?,
+    ])
 }
 
 struct ModelLibrary {
@@ -341,7 +435,9 @@ impl ModelLibrary {
                     false,
                 );
             }
-            faces.push(face);
+            if face.finalize() {
+                faces.push(face);
+            }
         }
         faces
     }
@@ -624,6 +720,8 @@ fn make_model_face(
         vertices,
         uvs,
         texture,
+        normal: Vector3::zero(),
+        plane_d: 0.0,
     })
 }
 
@@ -660,7 +758,6 @@ fn rotate_point(
     }
     let rotated = match axis {
         "x" => Vector3::new(p.x, cos * p.y - sin * p.z, sin * p.y + cos * p.z),
-        // Minecraft's positive block-state Y rotation turns north toward east.
         "y" => Vector3::new(cos * p.x - sin * p.z, p.y, sin * p.x + cos * p.z),
         "z" => Vector3::new(cos * p.x - sin * p.y, sin * p.x + cos * p.y, p.z),
         _ => p,
@@ -700,8 +797,13 @@ fn triangle_barycentric(point: Vector3, a: Vector3, b: Vector3, c: Vector3) -> O
 }
 
 impl RayIntersect for VoxelWorld {
-    fn ray_intersect(&self, ray_origin: &Vector3, ray_direction: &Vector3) -> Option<RayHit> {
-        let (entry, exit) = ray_box_interval(*ray_origin, *ray_direction, self.min, self.max)?;
+    fn ray_intersect<'a>(
+        &'a self,
+        ray_origin: &Vector3,
+        ray_direction: &Vector3,
+    ) -> Option<RayHit<'a>> {
+        let (entry, exit, entry_axis) =
+            ray_box_interval(*ray_origin, *ray_direction, self.min, self.max)?;
         const MIN_RAY_DISTANCE: f32 = 0.001;
         let start_distance = entry.max(MIN_RAY_DISTANCE);
         if start_distance > exit {
@@ -724,9 +826,16 @@ impl RayIntersect for VoxelWorld {
         let (step_y, mut next_y, delta_y) = grid_step(ray_origin.y, ray_direction.y, self.min.y, y);
         let (step_z, mut next_z, delta_z) = grid_step(ray_origin.z, ray_direction.z, self.min.z, z);
         let mut entered_at = start_distance;
+        let steps = [step_x, step_y, step_z];
+        let mut entered_axis = if entry > MIN_RAY_DISTANCE {
+            entry_axis
+        } else {
+            None
+        };
 
         while let Some(index) = self.index(x, y, z) {
-            let cell_exit = next_x.min(next_y).min(next_z).min(exit);
+            let next_boundary = next_x.min(next_y).min(next_z);
+            let cell_exit = next_boundary.min(exit);
             if let Some(model_index) = self.blocks[index] {
                 let block = &self.models[model_index];
                 let cell_min = Vector3::new(
@@ -734,10 +843,49 @@ impl RayIntersect for VoxelWorld {
                     self.min.y + y as f32,
                     self.min.z + z as f32,
                 );
-                let mut closest_hit: Option<RayHit> = None;
+
+                if let Some(cube) = &block.cube_faces {
+                    let (axis, distance, side) = match entered_axis {
+                        Some(axis) => (axis, entered_at, if steps[axis] > 0 { 0 } else { 1 }),
+                        None => {
+                            let axis = if next_x <= next_y && next_x <= next_z {
+                                0
+                            } else if next_y <= next_z {
+                                1
+                            } else {
+                                2
+                            };
+                            (axis, next_boundary, if steps[axis] > 0 { 1 } else { 0 })
+                        }
+                    };
+                    let position = Vector3::new(
+                        ray_origin.x + ray_direction.x * distance,
+                        ray_origin.y + ray_direction.y * distance,
+                        ray_origin.z + ray_direction.z * distance,
+                    );
+                    let mut local = position - cell_min;
+                    local.x = local.x.clamp(0.0, 1.0);
+                    local.y = local.y.clamp(0.0, 1.0);
+                    local.z = local.z.clamp(0.0, 1.0);
+                    set_axis_value(&mut local, axis, side as f32);
+                    let color = block.faces[cube[axis * 2 + side]].color_at_local(local);
+
+                    let mut normal = Vector3::zero();
+                    set_axis_value(&mut normal, axis, -(steps[axis] as f32));
+                    return Some(RayHit {
+                        material: &block.material,
+                        distance,
+                        position,
+                        normal,
+                        color: Some(color),
+                    });
+                }
+
+                let local_origin = *ray_origin - cell_min;
+                let mut closest_hit: Option<RayHit<'_>> = None;
                 for face in &block.faces {
                     if let Some((distance, normal, color)) =
-                        face.ray_intersect(*ray_origin, *ray_direction, cell_min)
+                        face.ray_intersect(local_origin, *ray_direction)
                     {
                         if distance + 0.0001 >= entered_at
                             && distance <= cell_exit + 0.0001
@@ -751,7 +899,7 @@ impl RayIntersect for VoxelWorld {
                                 ray_origin.z + ray_direction.z * distance,
                             );
                             closest_hit = Some(RayHit {
-                                material: block.material.clone(),
+                                material: &block.material,
                                 distance,
                                 position,
                                 normal,
@@ -776,7 +924,7 @@ impl RayIntersect for VoxelWorld {
                                 ray_origin.z + ray_direction.z * distance,
                             );
                             closest_hit = Some(RayHit {
-                                material: block.material.clone(),
+                                material: &block.material,
                                 distance,
                                 position,
                                 normal,
@@ -792,14 +940,17 @@ impl RayIntersect for VoxelWorld {
 
             if next_x <= next_y && next_x <= next_z {
                 entered_at = next_x;
+                entered_axis = Some(0);
                 x += step_x;
                 next_x += delta_x;
             } else if next_y <= next_z {
                 entered_at = next_y;
+                entered_axis = Some(1);
                 y += step_y;
                 next_y += delta_y;
             } else {
                 entered_at = next_z;
+                entered_axis = Some(2);
                 z += step_z;
                 next_z += delta_z;
             }
@@ -946,15 +1097,19 @@ fn ray_box_interval(
     direction: Vector3,
     min: Vector3,
     max: Vector3,
-) -> Option<(f32, f32)> {
+) -> Option<(f32, f32, Option<usize>)> {
     let mut entry = f32::NEG_INFINITY;
     let mut exit = f32::INFINITY;
+    let mut entry_axis = None;
 
-    for (origin, direction, minimum, maximum) in [
+    for (axis, (origin, direction, minimum, maximum)) in [
         (origin.x, direction.x, min.x, max.x),
         (origin.y, direction.y, min.y, max.y),
         (origin.z, direction.z, min.z, max.z),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         if direction.abs() < f32::EPSILON {
             if origin < minimum || origin > maximum {
                 return None;
@@ -967,14 +1122,17 @@ fn ray_box_interval(
         if near > far {
             std::mem::swap(&mut near, &mut far);
         }
-        entry = entry.max(near);
+        if near > entry {
+            entry = near;
+            entry_axis = Some(axis);
+        }
         exit = exit.min(far);
         if entry > exit {
             return None;
         }
     }
 
-    Some((entry, exit))
+    Some((entry, exit, entry_axis))
 }
 
 fn material_for_block(block_state: &str, textures: &mut TextureLibrary) -> Option<Material> {
@@ -1396,7 +1554,7 @@ mod tests {
 
     #[test]
     fn loads_the_bundled_lon_lon_ranch_schematic() {
-        let world = VoxelWorld::from_schematic(include_bytes!("../assets/lonlonranch.schem"))
+        let world = VoxelWorld::from_schematic(include_bytes!("../assets/lonlonranchclean.schem"))
             .expect("the bundled schematic should load");
 
         assert!(world.width > 0 && world.height > 0 && world.length > 0);

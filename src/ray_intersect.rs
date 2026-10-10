@@ -1,8 +1,8 @@
 use crate::material::Material;
 use raylib::prelude::*;
 
-pub struct RayHit {
-    pub material: Material,
+pub struct RayHit<'a> {
+    pub material: &'a Material,
     pub distance: f32,
     pub position: Vector3,
     pub normal: Vector3,
@@ -10,5 +10,9 @@ pub struct RayHit {
 }
 
 pub trait RayIntersect {
-    fn ray_intersect(&self, ray_origin: &Vector3, ray_direction: &Vector3) -> Option<RayHit>;
+    fn ray_intersect<'a>(
+        &'a self,
+        ray_origin: &Vector3,
+        ray_direction: &Vector3,
+    ) -> Option<RayHit<'a>>;
 }

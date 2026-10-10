@@ -22,7 +22,11 @@ impl Cube {
 }
 
 impl RayIntersect for Cube {
-    fn ray_intersect(&self, ray_origin: &Vector3, ray_direction: &Vector3) -> Option<RayHit> {
+    fn ray_intersect<'a>(
+        &'a self,
+        ray_origin: &Vector3,
+        ray_direction: &Vector3,
+    ) -> Option<RayHit<'a>> {
         let half_size = self.size * 0.5;
         let min = self.center - Vector3::new(half_size, half_size, half_size);
         let max = self.center + Vector3::new(half_size, half_size, half_size);
@@ -67,7 +71,7 @@ impl RayIntersect for Cube {
         let position = *ray_origin + *ray_direction * t;
         let normal = cube_normal(position, min, max);
         Some(RayHit {
-            material: self.material.clone(),
+            material: &self.material,
             distance: t,
             position,
             normal,
@@ -115,7 +119,8 @@ mod tests {
 
     #[test]
     fn hits_the_nearest_face() {
-        let hit = test_cube()
+        let cube = test_cube();
+        let hit = cube
             .ray_intersect(&Vector3::new(0.0, 0.0, 0.0), &Vector3::new(0.0, 0.0, -1.0))
             .expect("ray should hit the cube");
 
@@ -124,15 +129,17 @@ mod tests {
 
     #[test]
     fn rejects_a_ray_outside_a_parallel_slab() {
+        let cube = test_cube();
         let hit =
-            test_cube().ray_intersect(&Vector3::new(2.0, 0.0, 0.0), &Vector3::new(0.0, 0.0, -1.0));
+            cube.ray_intersect(&Vector3::new(2.0, 0.0, 0.0), &Vector3::new(0.0, 0.0, -1.0));
 
         assert!(hit.is_none());
     }
 
     #[test]
     fn returns_the_exit_face_when_starting_inside() {
-        let hit = test_cube()
+        let cube = test_cube();
+        let hit = cube
             .ray_intersect(&Vector3::new(0.0, 0.0, -5.0), &Vector3::new(1.0, 0.0, 0.0))
             .expect("ray should leave the cube");
 

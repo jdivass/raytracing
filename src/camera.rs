@@ -2,7 +2,7 @@ use std::f32::consts::FRAC_PI_2;
 
 use raylib::prelude::*;
 
-pub struct Camera {
+pub struct FlyCamera {
     pub position: Vector3,
     yaw: f32,
     pitch: f32,
@@ -10,7 +10,7 @@ pub struct Camera {
     mouse_sensitivity: f32,
 }
 
-impl Camera {
+impl FlyCamera {
     pub fn new(position: Vector3) -> Self {
         Self {
             position,
@@ -77,24 +77,37 @@ impl Camera {
         moved
     }
 
-    pub fn ray_direction(&self, screen_x: f32, screen_y: f32) -> Vector3 {
-        let cos_pitch = self.pitch.cos();
-        let forward = Vector3::new(
-            self.yaw.cos() * cos_pitch,
-            self.pitch.sin(),
-            self.yaw.sin() * cos_pitch,
-        );
-        let right = Vector3::new(-self.yaw.sin(), 0.0, self.yaw.cos());
-        let up = Vector3::new(
-            -self.yaw.cos() * self.pitch.sin(),
-            cos_pitch,
-            -self.yaw.sin() * self.pitch.sin(),
-        );
+    pub fn basis(&self) -> CameraBasis {
+        let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
+        let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
+        CameraBasis {
+            origin: self.position,
+            forward: Vector3::new(cos_yaw * cos_pitch, sin_pitch, sin_yaw * cos_pitch),
+            right: Vector3::new(-sin_yaw, 0.0, cos_yaw),
+            up: Vector3::new(-cos_yaw * sin_pitch, cos_pitch, -sin_yaw * sin_pitch),
+        }
+    }
 
+    pub fn ray_direction(&self, screen_x: f32, screen_y: f32) -> Vector3 {
+        self.basis().ray_direction(screen_x, screen_y)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct CameraBasis {
+    pub origin: Vector3,
+    pub forward: Vector3,
+    pub right: Vector3,
+    pub up: Vector3,
+}
+
+impl CameraBasis {
+    #[inline]
+    pub fn ray_direction(&self, screen_x: f32, screen_y: f32) -> Vector3 {
         Vector3::new(
-            forward.x + right.x * screen_x + up.x * screen_y,
-            forward.y + right.y * screen_x + up.y * screen_y,
-            forward.z + right.z * screen_x + up.z * screen_y,
+            self.forward.x + self.right.x * screen_x + self.up.x * screen_y,
+            self.forward.y + self.right.y * screen_x + self.up.y * screen_y,
+            self.forward.z + self.right.z * screen_x + self.up.z * screen_y,
         )
         .normalize()
     }
