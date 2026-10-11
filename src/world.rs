@@ -131,16 +131,15 @@ impl VoxelWorld {
     }
 
     pub fn camera_start(&self) -> Vector3 {
-        let largest_dimension = self.width.max(self.length) as f32;
         Vector3::new(
             0.0,
-            self.height as f32 + largest_dimension * 0.4,
-            self.max.z + largest_dimension * 0.45,
+            5.0,
+            0.0
         )
     }
 
     pub fn camera_target(&self) -> Vector3 {
-        Vector3::new(0.0, self.height as f32 * 0.3, 0.0)
+        Vector3::new(3.0, 5.0, 0.0)
     }
 
     fn index(&self, x: isize, y: isize, z: isize) -> Option<usize> {
