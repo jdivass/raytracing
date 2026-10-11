@@ -1235,7 +1235,9 @@ fn material_for_block(block_state: &str, textures: &mut TextureLibrary) -> Optio
         _ => (150, 150, 150),
     };
 
-    let material = textures.material_for(block, Color::new(color.0, color.1, color.2, 255));
+    let material = textures
+        .material_for(block, Color::new(color.0, color.1, color.2, 255))
+        .with_specular(0.22);
     let emission = match block {
         "lantern" | "soul_lantern" => 1.5,
         "torch" | "wall_torch" | "candle" => 1.0,

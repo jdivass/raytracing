@@ -15,6 +15,7 @@ mod world;
 
 use camera::FlyCamera;
 use framebuffer::Framebuffer;
+use material::Material;
 use ray_intersect::RayIntersect;
 use world::VoxelWorld;
 
@@ -39,7 +40,7 @@ impl Skybox {
         Self { width, height, pixels }
     }
 
-    fn sample(&self, direction: &Vector3, cycle: DayCycle) -> Color {
+    fn sample(&self, direction: &Vector3, cycle: &DayCycle) -> Color {
         let yaw = direction.x.atan2(direction.z);
         let pitch = direction.y.clamp(-1.0, 1.0).asin();
         let u = (0.5 + yaw / (2.0 * PI)).rem_euclid(1.0);
@@ -47,14 +48,10 @@ impl Skybox {
         let x = (u * self.width as f32).floor() as i32 % self.width;
         let y = ((v * self.height as f32).floor() as i32).clamp(0, self.height - 1);
         let mut color = self.pixels[(y * self.width + x) as usize];
-        let sun_dot = direction.dot(cycle.sun_direction).clamp(-1.0, 1.0);
-        let moon_dot = direction.dot(cycle.moon_direction).clamp(-1.0, 1.0);
-        let sun_radius = 0.035_f32.cos();
-        let moon_radius = 0.022_f32.cos();
-        if sun_dot > sun_radius && cycle.daylight > 0.02 {
-            color = Color::new(255, 238, 190, 255);
-        } else if moon_dot > moon_radius {
-            color = Color::new(205, 218, 255, 255);
+        if square_celestial_body(direction, cycle.sun_direction, 0.035) && cycle.daylight > 0.02 {
+            color = celestial_color(&cycle.sun_material);
+        } else if square_celestial_body(direction, cycle.moon_direction, 0.022) {
+            color = celestial_color(&cycle.moon_material);
         }
         let night = 0.10 + cycle.daylight * 0.90;
         Color::new(
@@ -66,12 +63,39 @@ impl Skybox {
     }
 }
 
-#[derive(Clone, Copy)]
+fn celestial_color(material: &Material) -> Color {
+    let brightness = (0.85 + material.emission * 0.3).min(1.5) * material.albedo;
+    Color::new(
+        (material.diffuse.r as f32 * brightness).min(255.0) as u8,
+        (material.diffuse.g as f32 * brightness).min(255.0) as u8,
+        (material.diffuse.b as f32 * brightness).min(255.0) as u8,
+        255,
+    )
+}
+
+fn square_celestial_body(direction: &Vector3, center: Vector3, half_size: f32) -> bool {
+    let reference_up = if center.y.abs() > 0.98 {
+        Vector3::new(0.0, 0.0, 1.0)
+    } else {
+        Vector3::new(0.0, 1.0, 0.0)
+    };
+    let right = reference_up.cross(center).normalize();
+    let up = center.cross(right).normalize();
+    let forward = direction.dot(center);
+    if forward <= 0.0 {
+        return false;
+    }
+    let size = half_size.tan() * forward;
+    direction.dot(right).abs() <= size && direction.dot(up).abs() <= size
+}
+
 struct DayCycle {
     time: f32,
     sun_direction: Vector3,
     moon_direction: Vector3,
     daylight: f32,
+    sun_material: Material,
+    moon_material: Material,
 }
 
 impl DayCycle {
@@ -80,7 +104,21 @@ impl DayCycle {
         let sun_direction = Vector3::new(angle.cos(), angle.sin(), 0.25).normalize();
         let moon_direction = sun_direction * -1.0;
         let daylight = sun_direction.y.max(0.0).powf(0.65);
-        Self { time: time.rem_euclid(1.0), sun_direction, moon_direction, daylight }
+        let sun_material = Material::solid(Color::new(255, 188, 20, 255))
+            .with_albedo(1.0)
+            .with_specular(1.0)
+            .with_transparency(0.0)
+            .with_emission(1.4)
+            .with_reflection(0.02)
+            .with_refraction(0.0, 1.0);
+        let moon_material = Material::solid(Color::new(195, 211, 255, 255))
+            .with_albedo(0.9)
+            .with_specular(0.2)
+            .with_transparency(0.0)
+            .with_emission(0.08)
+            .with_reflection(0.12)
+            .with_refraction(0.0, 1.0);
+        Self { time: time.rem_euclid(1.0), sun_direction, moon_direction, daylight, sun_material, moon_material }
     }
 
     fn advance(&mut self, amount: f32) {
@@ -88,11 +126,11 @@ impl DayCycle {
     }
 }
 
-fn cast_ray(ray_origin: &Vector3, ray_direction: &Vector3, world: &VoxelWorld, skybox: &Skybox, cycle: DayCycle, max_bounces: u8) -> Color {
+fn cast_ray(ray_origin: &Vector3, ray_direction: &Vector3, world: &VoxelWorld, skybox: &Skybox, cycle: &DayCycle, max_bounces: u8) -> Color {
     cast_ray_depth(ray_origin, ray_direction, world, skybox, cycle, 0, max_bounces)
 }
 
-fn cast_ray_depth(ray_origin: &Vector3, ray_direction: &Vector3, world: &VoxelWorld, skybox: &Skybox, cycle: DayCycle, depth: u8, max_bounces: u8) -> Color {
+fn cast_ray_depth(ray_origin: &Vector3, ray_direction: &Vector3, world: &VoxelWorld, skybox: &Skybox, cycle: &DayCycle, depth: u8, max_bounces: u8) -> Color {
     let sky = skybox.sample(ray_direction, cycle);
     let mut origin = *ray_origin;
     let mut accumulated = [0.0_f32; 3];
@@ -111,20 +149,23 @@ fn cast_ray_depth(ray_origin: &Vector3, ray_direction: &Vector3, world: &VoxelWo
         color.b = (color.b as f32 * hit.material.albedo).clamp(0.0, 255.0) as u8;
         let emitted = world.emission_at(hit.position, hit.normal);
         let self_emission = hit.material.emission;
-        let sun = shading_normal.dot(cycle.sun_direction).max(0.0) * cycle.daylight;
-        let moon = shading_normal.dot(cycle.moon_direction).max(0.0) * 0.07;
-        let daylight = 0.10 + sun * 0.90 + moon;
+        let sun = shading_normal.dot(cycle.sun_direction).max(0.0) * cycle.daylight * cycle.sun_material.emission;
+        let moon = shading_normal.dot(cycle.moon_direction).max(0.0) * cycle.moon_material.emission;
+        let daylight_r = 0.10 + sun * cycle.sun_material.diffuse.r as f32 / 255.0 + moon;
+        let daylight_g = 0.10 + sun * cycle.sun_material.diffuse.g as f32 / 255.0 + moon;
+        let daylight_b = 0.10 + sun * cycle.sun_material.diffuse.b as f32 / 255.0 + moon;
         let view_direction = *ray_direction * -1.0;
         let half_vector = (cycle.sun_direction + view_direction).normalize();
         let specular_light = hit.material.specular
-            * shading_normal.dot(half_vector).max(0.0).powf(48.0)
-            * cycle.daylight;
-        color.r = (color.r as f32 * daylight + emitted[0] + color.r as f32 * self_emission).clamp(0.0, 255.0) as u8;
-        color.g = (color.g as f32 * daylight + emitted[1] + color.g as f32 * self_emission).clamp(0.0, 255.0) as u8;
-        color.b = (color.b as f32 * daylight + emitted[2] + color.b as f32 * self_emission).clamp(0.0, 255.0) as u8;
+            * cycle.sun_material.specular
+            * shading_normal.dot(half_vector).max(0.0).powf(24.0)
+            * cycle.daylight * cycle.sun_material.emission;
+        color.r = (color.r as f32 * daylight_r + emitted[0] + color.r as f32 * self_emission).clamp(0.0, 255.0) as u8;
+        color.g = (color.g as f32 * daylight_g + emitted[1] + color.g as f32 * self_emission).clamp(0.0, 255.0) as u8;
+        color.b = (color.b as f32 * daylight_b + emitted[2] + color.b as f32 * self_emission).clamp(0.0, 255.0) as u8;
         color.r = (color.r as f32 + 255.0 * specular_light).clamp(0.0, 255.0) as u8;
-        color.g = (color.g as f32 + 244.0 * specular_light).clamp(0.0, 255.0) as u8;
-        color.b = (color.b as f32 + 220.0 * specular_light).clamp(0.0, 255.0) as u8;
+        color.g = (color.g as f32 + 218.0 * specular_light).clamp(0.0, 255.0) as u8;
+        color.b = (color.b as f32 + 90.0 * specular_light).clamp(0.0, 255.0) as u8;
         if depth < max_bounces && (hit.material.reflection > 0.0 || hit.material.refraction > 0.0) {
             let mut normal = shading_normal;
             let entering = ray_direction.dot(normal) < 0.0;
@@ -178,7 +219,7 @@ fn cast_ray_depth(ray_origin: &Vector3, ray_direction: &Vector3, world: &VoxelWo
     )
 }
 
-fn render(framebuffer: &mut Framebuffer, world: &VoxelWorld, camera: &FlyCamera, skybox: &Skybox, cycle: DayCycle, max_bounces: u8) {
+fn render(framebuffer: &mut Framebuffer, world: &VoxelWorld, camera: &FlyCamera, skybox: &Skybox, cycle: &DayCycle, max_bounces: u8) {
     let width_px = framebuffer.width as usize;
     let height_px = framebuffer.height as usize;
     if width_px == 0 || height_px == 0 {
@@ -269,7 +310,7 @@ fn main() {
 
         if last_camera_motion.elapsed() < Duration::from_millis(180) {
             let started = Instant::now();
-            render(&mut preview_framebuffer, &world, &camera, &skybox, day_cycle, 1);
+            render(&mut preview_framebuffer, &world, &camera, &skybox, &day_cycle, 1);
             let render_ms = started.elapsed().as_secs_f32() * 1000.0;
             preview_framebuffer.swap_buffers(&mut window, &raylib_thread);
 
@@ -286,7 +327,7 @@ fn main() {
             }
         } else {
             if needs_full_render {
-                render(&mut framebuffer, &world, &camera, &skybox, day_cycle, 3);
+                render(&mut framebuffer, &world, &camera, &skybox, &day_cycle, 3);
                 needs_full_render = false;
             }
             framebuffer.swap_buffers(&mut window, &raylib_thread);

@@ -50,31 +50,31 @@ impl FlyCamera {
 
         if window.is_key_down(KeyboardKey::KEY_W) {
             moved = true;
-            self.position.x += forward_x * distance;
+            self.position.x += 2.0 * forward_x * distance;
             self.position.z += forward_z * distance;
         }
         if window.is_key_down(KeyboardKey::KEY_S) {
             moved = true;
-            self.position.x -= forward_x * distance;
+            self.position.x -= 2.0 * forward_x * distance;
             self.position.z -= forward_z * distance;
         }
         if window.is_key_down(KeyboardKey::KEY_D) {
             moved = true;
-            self.position.x += right_x * distance;
-            self.position.z += right_z * distance;
+            self.position.x += 2.0 * right_x * distance;
+            self.position.z += 2.0 * right_z * distance;
         }
         if window.is_key_down(KeyboardKey::KEY_A) {
             moved = true;
-            self.position.x -= right_x * distance;
-            self.position.z -= right_z * distance;
+            self.position.x -= 2.0 * right_x * distance;
+            self.position.z -= 2.0 * right_z * distance;
         }
         if window.is_key_down(KeyboardKey::KEY_E) {
             moved = true;
-            self.position.y += distance;
+            self.position.y += 2.0 * distance;
         }
         if window.is_key_down(KeyboardKey::KEY_Q) {
             moved = true;
-            self.position.y -= distance;
+            self.position.y -= 2.0 * distance;
         }
         let zoom_rate = 1.5 * delta_time;
         if window.is_key_down(KeyboardKey::KEY_R) {
