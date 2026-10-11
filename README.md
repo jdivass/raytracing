@@ -74,5 +74,11 @@ Mantener una tecla de movimiento, zoom o tiempo activa el modo de previsualizaci
 | Por implementar al menos un material emisivo: linternas | 10 |
 | Por implementar un skybox para su material: fondo con imagen | 10 |
 
+
+## 📼 Video
+
+https://youtu.be/oW_NmRBAbKk
+
+
 ## 🤖 Autor
 Julián Divas - 24687
