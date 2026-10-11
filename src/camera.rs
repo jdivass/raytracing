@@ -8,6 +8,7 @@ pub struct FlyCamera {
     pitch: f32,
     move_speed: f32,
     mouse_sensitivity: f32,
+    vertical_fov: f32,
 }
 
 impl FlyCamera {
@@ -18,6 +19,7 @@ impl FlyCamera {
             pitch: 0.0,
             move_speed: 3.0,
             mouse_sensitivity: 0.0025,
+            vertical_fov: std::f32::consts::PI / 3.0,
         }
     }
 
@@ -74,7 +76,22 @@ impl FlyCamera {
             moved = true;
             self.position.y -= distance;
         }
+        let zoom_rate = 1.5 * delta_time;
+        if window.is_key_down(KeyboardKey::KEY_R) {
+            moved = true;
+            self.vertical_fov = (self.vertical_fov * (-zoom_rate).exp())
+                .clamp(20.0_f32.to_radians(), 100.0_f32.to_radians());
+        }
+        if window.is_key_down(KeyboardKey::KEY_F) {
+            moved = true;
+            self.vertical_fov = (self.vertical_fov * zoom_rate.exp())
+                .clamp(20.0_f32.to_radians(), 100.0_f32.to_radians());
+        }
         moved
+    }
+
+    pub fn vertical_fov(&self) -> f32 {
+        self.vertical_fov
     }
 
     pub fn basis(&self) -> CameraBasis {

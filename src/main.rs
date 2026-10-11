@@ -39,19 +39,57 @@ impl Skybox {
         Self { width, height, pixels }
     }
 
-    fn sample(&self, direction: &Vector3) -> Color {
+    fn sample(&self, direction: &Vector3, cycle: DayCycle) -> Color {
         let yaw = direction.x.atan2(direction.z);
         let pitch = direction.y.clamp(-1.0, 1.0).asin();
         let u = (0.5 + yaw / (2.0 * PI)).rem_euclid(1.0);
         let v = (0.5 - pitch / PI).clamp(0.0, 1.0);
         let x = (u * self.width as f32).floor() as i32 % self.width;
         let y = ((v * self.height as f32).floor() as i32).clamp(0, self.height - 1);
-        self.pixels[(y * self.width + x) as usize]
+        let mut color = self.pixels[(y * self.width + x) as usize];
+        let sun_dot = direction.dot(cycle.sun_direction).clamp(-1.0, 1.0);
+        let moon_dot = direction.dot(cycle.moon_direction).clamp(-1.0, 1.0);
+        let sun_radius = 0.035_f32.cos();
+        let moon_radius = 0.022_f32.cos();
+        if sun_dot > sun_radius && cycle.daylight > 0.02 {
+            color = Color::new(255, 238, 190, 255);
+        } else if moon_dot > moon_radius {
+            color = Color::new(205, 218, 255, 255);
+        }
+        let night = 0.10 + cycle.daylight * 0.90;
+        Color::new(
+            (color.r as f32 * night) as u8,
+            (color.g as f32 * night) as u8,
+            (color.b as f32 * night) as u8,
+            255,
+        )
     }
 }
 
-fn cast_ray(ray_origin: &Vector3, ray_direction: &Vector3, world: &VoxelWorld, skybox: &Skybox) -> Color {
-    let sky = skybox.sample(ray_direction);
+#[derive(Clone, Copy)]
+struct DayCycle {
+    time: f32,
+    sun_direction: Vector3,
+    moon_direction: Vector3,
+    daylight: f32,
+}
+
+impl DayCycle {
+    fn new(time: f32) -> Self {
+        let angle = time.rem_euclid(1.0) * 2.0 * PI - PI / 2.0;
+        let sun_direction = Vector3::new(angle.cos(), angle.sin(), 0.25).normalize();
+        let moon_direction = sun_direction * -1.0;
+        let daylight = sun_direction.y.max(0.0).powf(0.65);
+        Self { time: time.rem_euclid(1.0), sun_direction, moon_direction, daylight }
+    }
+
+    fn advance(&mut self, amount: f32) {
+        *self = Self::new(self.time + amount);
+    }
+}
+
+fn cast_ray(ray_origin: &Vector3, ray_direction: &Vector3, world: &VoxelWorld, skybox: &Skybox, cycle: DayCycle) -> Color {
+    let sky = skybox.sample(ray_direction, cycle);
     let mut origin = *ray_origin;
     let mut accumulated = [0.0_f32; 3];
     let mut transmittance = 1.0_f32;
@@ -65,9 +103,12 @@ fn cast_ray(ray_origin: &Vector3, ray_direction: &Vector3, world: &VoxelWorld, s
             .unwrap_or_else(|| hit.material.color_at(hit.position, hit.normal));
         let emitted = world.emission_at(hit.position, hit.normal);
         let self_emission = hit.material.emission;
-        color.r = (color.r as f32 + emitted[0] + color.r as f32 * self_emission).clamp(0.0, 255.0) as u8;
-        color.g = (color.g as f32 + emitted[1] + color.g as f32 * self_emission).clamp(0.0, 255.0) as u8;
-        color.b = (color.b as f32 + emitted[2] + color.b as f32 * self_emission).clamp(0.0, 255.0) as u8;
+        let sun = hit.normal.dot(cycle.sun_direction).max(0.0) * cycle.daylight;
+        let moon = hit.normal.dot(cycle.moon_direction).max(0.0) * 0.07;
+        let daylight = 0.10 + sun * 0.90 + moon;
+        color.r = (color.r as f32 * daylight + emitted[0] + color.r as f32 * self_emission).clamp(0.0, 255.0) as u8;
+        color.g = (color.g as f32 * daylight + emitted[1] + color.g as f32 * self_emission).clamp(0.0, 255.0) as u8;
+        color.b = (color.b as f32 * daylight + emitted[2] + color.b as f32 * self_emission).clamp(0.0, 255.0) as u8;
         let alpha = color.a as f32 / 255.0;
         accumulated[0] += color.r as f32 * alpha * transmittance;
         accumulated[1] += color.g as f32 * alpha * transmittance;
@@ -87,7 +128,7 @@ fn cast_ray(ray_origin: &Vector3, ray_direction: &Vector3, world: &VoxelWorld, s
     )
 }
 
-fn render(framebuffer: &mut Framebuffer, world: &VoxelWorld, camera: &FlyCamera, skybox: &Skybox) {
+fn render(framebuffer: &mut Framebuffer, world: &VoxelWorld, camera: &FlyCamera, skybox: &Skybox, cycle: DayCycle) {
     let width_px = framebuffer.width as usize;
     let height_px = framebuffer.height as usize;
     if width_px == 0 || height_px == 0 {
@@ -96,7 +137,7 @@ fn render(framebuffer: &mut Framebuffer, world: &VoxelWorld, camera: &FlyCamera,
 
     let width = width_px as f32;
     let height = height_px as f32;
-    let fov = PI / 3.0;
+    let fov = camera.vertical_fov();
     let aspect_ratio = width / height;
     let perspective_scale = (fov / 2.0).tan();
 
@@ -113,7 +154,7 @@ fn render(framebuffer: &mut Framebuffer, world: &VoxelWorld, camera: &FlyCamera,
             let screen_y = (1.0 - (2.0 * y as f32) / height) * perspective_scale;
             for (pixel, &screen_x) in row.chunks_exact_mut(4).zip(column_x.iter()) {
                 let ray_direction = basis.ray_direction(screen_x, screen_y);
-                let color = cast_ray(&basis.origin, &ray_direction, world, skybox);
+                let color = cast_ray(&basis.origin, &ray_direction, world, skybox, cycle);
                 pixel.copy_from_slice(&[color.r, color.g, color.b, 255]);
             }
         });
@@ -154,8 +195,23 @@ fn main() {
     let mut last_camera_motion = Instant::now() - Duration::from_secs(1);
 
     let mut needs_full_render = true;
+    let mut day_cycle = DayCycle::new(0.5);
 
     while !window.window_should_close() {
+        let time_delta = window.get_frame_time() * 0.035;
+        let mut time_changed = false;
+        if window.is_key_down(KeyboardKey::KEY_Z) {
+            day_cycle.advance(-time_delta);
+            time_changed = true;
+        }
+        if window.is_key_down(KeyboardKey::KEY_C) {
+            day_cycle.advance(time_delta);
+            time_changed = true;
+        }
+        if time_changed {
+            last_camera_motion = Instant::now();
+            needs_full_render = true;
+        }
         if camera.update(&window, window.get_frame_time()) {
             last_camera_motion = Instant::now();
             needs_full_render = true;
@@ -163,7 +219,7 @@ fn main() {
 
         if last_camera_motion.elapsed() < Duration::from_millis(180) {
             let started = Instant::now();
-            render(&mut preview_framebuffer, &world, &camera, &skybox);
+            render(&mut preview_framebuffer, &world, &camera, &skybox, day_cycle);
             let render_ms = started.elapsed().as_secs_f32() * 1000.0;
             preview_framebuffer.swap_buffers(&mut window, &raylib_thread);
 
@@ -180,7 +236,7 @@ fn main() {
             }
         } else {
             if needs_full_render {
-                render(&mut framebuffer, &world, &camera, &skybox);
+                render(&mut framebuffer, &world, &camera, &skybox, day_cycle);
                 needs_full_render = false;
             }
             framebuffer.swap_buffers(&mut window, &raylib_thread);
