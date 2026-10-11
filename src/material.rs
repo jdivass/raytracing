@@ -18,6 +18,7 @@ pub struct Material {
     pub refraction: f32,
     pub refractive_index: f32,
     textures: Option<Arc<BlockTextures>>,
+    normal_map: Option<Arc<Texture>>,
 }
 
 #[derive(Clone)]
@@ -50,6 +51,7 @@ impl Material {
             refraction: 0.0,
             refractive_index: 1.0,
             textures: None,
+            normal_map: None,
         }
     }
 
@@ -84,6 +86,11 @@ impl Material {
         self
     }
 
+    pub(crate) fn with_normal_map(mut self, normal_map: Arc<Texture>) -> Self {
+        self.normal_map = Some(normal_map);
+        self
+    }
+
     fn textured(diffuse: Color, textures: BlockTextures) -> Self {
         Self {
             diffuse,
@@ -95,6 +102,7 @@ impl Material {
             refraction: 0.0,
             refractive_index: 1.0,
             textures: Some(Arc::new(textures)),
+            normal_map: None,
         }
     }
 
@@ -114,6 +122,26 @@ impl Material {
         };
 
         texture.sample(u, v)
+    }
+
+    pub fn normal_at(&self, position: Vector3, geometric_normal: Vector3) -> Vector3 {
+        let Some(normal_map) = &self.normal_map else { return geometric_normal; };
+        let (u, v, tangent, bitangent, face_normal) = if geometric_normal.y.abs() > 0.5 {
+            (position.x, position.z, Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 0.0, 1.0), Vector3::new(0.0, geometric_normal.y.signum(), 0.0))
+        } else if geometric_normal.x.abs() > 0.5 {
+            (position.z, position.y, Vector3::new(0.0, 0.0, 1.0), Vector3::new(0.0, 1.0, 0.0), Vector3::new(geometric_normal.x.signum(), 0.0, 0.0))
+        } else {
+            (position.x, position.y, Vector3::new(1.0, 0.0, 0.0), Vector3::new(0.0, 1.0, 0.0), Vector3::new(0.0, 0.0, geometric_normal.z.signum()))
+        };
+        // This image covers a wall-sized area: map its 16-unit UV span across
+        // the diorama instead of repeating the entire image on every block.
+        let sample = normal_map.sample_uv(u, v);
+        let tangent_normal = Vector3::new(
+            sample.r as f32 / 127.5 - 1.0,
+            sample.g as f32 / 127.5 - 1.0,
+            sample.b as f32 / 127.5 - 1.0,
+        ).normalize();
+        (tangent * tangent_normal.x + bitangent * tangent_normal.y + face_normal * tangent_normal.z).normalize()
     }
 }
 
@@ -169,6 +197,10 @@ impl TextureLibrary {
 
     pub(crate) fn load_model_texture(&mut self, name: &str) -> Option<Arc<Texture>> {
         self.load(name)
+    }
+
+    pub(crate) fn load_image_file(&mut self, path: &Path) -> Option<Arc<Texture>> {
+        load_texture(path)
     }
 }
 
@@ -310,7 +342,7 @@ fn texture_names_for(block: &str) -> (String, String, String) {
             format!("{block}_top"),
         ),
         block if block.ends_with("_stairs") => plank_texture(block.trim_end_matches("_stairs")),
-        block if block.ends_with("_slab") => plank_texture(block.trim_end_matches("_slab")),
+    block if block.ends_with("_slab") => plank_texture(block.trim_end_matches("_slab")),
         block if block.ends_with("_fence_gate") => {
             plank_texture(block.trim_end_matches("_fence_gate"))
         }
@@ -328,6 +360,7 @@ fn texture_names_for(block: &str) -> (String, String, String) {
 
 fn plank_texture(base: &str) -> (String, String, String) {
     match base {
+        "brick" => ("bricks".into(), "bricks".into(), "bricks".into()),
         "quartz" => (
             "quartz_block_side".into(),
             "quartz_block_top".into(),

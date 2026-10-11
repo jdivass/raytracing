@@ -105,18 +105,19 @@ fn cast_ray_depth(ray_origin: &Vector3, ray_direction: &Vector3, world: &VoxelWo
         let mut color = hit
             .color
             .unwrap_or_else(|| hit.material.color_at(hit.position, hit.normal));
+        let shading_normal = hit.material.normal_at(hit.position, hit.normal);
         color.r = (color.r as f32 * hit.material.albedo).clamp(0.0, 255.0) as u8;
         color.g = (color.g as f32 * hit.material.albedo).clamp(0.0, 255.0) as u8;
         color.b = (color.b as f32 * hit.material.albedo).clamp(0.0, 255.0) as u8;
         let emitted = world.emission_at(hit.position, hit.normal);
         let self_emission = hit.material.emission;
-        let sun = hit.normal.dot(cycle.sun_direction).max(0.0) * cycle.daylight;
-        let moon = hit.normal.dot(cycle.moon_direction).max(0.0) * 0.07;
+        let sun = shading_normal.dot(cycle.sun_direction).max(0.0) * cycle.daylight;
+        let moon = shading_normal.dot(cycle.moon_direction).max(0.0) * 0.07;
         let daylight = 0.10 + sun * 0.90 + moon;
         let view_direction = *ray_direction * -1.0;
         let half_vector = (cycle.sun_direction + view_direction).normalize();
         let specular_light = hit.material.specular
-            * hit.normal.dot(half_vector).max(0.0).powf(48.0)
+            * shading_normal.dot(half_vector).max(0.0).powf(48.0)
             * cycle.daylight;
         color.r = (color.r as f32 * daylight + emitted[0] + color.r as f32 * self_emission).clamp(0.0, 255.0) as u8;
         color.g = (color.g as f32 * daylight + emitted[1] + color.g as f32 * self_emission).clamp(0.0, 255.0) as u8;
@@ -125,7 +126,7 @@ fn cast_ray_depth(ray_origin: &Vector3, ray_direction: &Vector3, world: &VoxelWo
         color.g = (color.g as f32 + 244.0 * specular_light).clamp(0.0, 255.0) as u8;
         color.b = (color.b as f32 + 220.0 * specular_light).clamp(0.0, 255.0) as u8;
         if depth < max_bounces && (hit.material.reflection > 0.0 || hit.material.refraction > 0.0) {
-            let mut normal = hit.normal;
+            let mut normal = shading_normal;
             let entering = ray_direction.dot(normal) < 0.0;
             if !entering { normal = normal * -1.0; }
             let cosine = (-ray_direction.dot(normal)).clamp(0.0, 1.0);

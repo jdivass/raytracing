@@ -67,10 +67,24 @@ impl VoxelWorld {
         let mut models = Vec::new();
         let mut palette = HashMap::new();
         for (palette_index, block_state) in schematic.palette {
-            let Some(material) = material_for_block(&block_state, &mut textures) else {
+            let Some(mut material) = material_for_block(&block_state, &mut textures) else {
                 palette.insert(palette_index, None);
                 continue;
             };
+            let normalized_block = block_state.strip_prefix("minecraft:").unwrap_or(&block_state).split('[').next().unwrap_or(&block_state);
+            let normal_map_name = match normalized_block {
+                "bricks" | "brick_slab" | "brick_stairs" => Some("normal_bricks.jpg"),
+                "cobblestone" => Some("normal_rocks.jpg"),
+                _ => None,
+            };
+            if let Some(normal_map_name) = normal_map_name {
+                let normal_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("assets")
+                    .join(normal_map_name);
+                if let Some(normal_map) = textures.load_image_file(&normal_path) {
+                    material = material.with_normal_map(normal_map);
+                }
+            }
             let faces = model_library.faces_for_block_state(&block_state, &mut textures);
             let shapes = if faces.is_empty() {
                 shapes_for_block(&block_state)
