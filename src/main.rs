@@ -88,7 +88,11 @@ impl DayCycle {
     }
 }
 
-fn cast_ray(ray_origin: &Vector3, ray_direction: &Vector3, world: &VoxelWorld, skybox: &Skybox, cycle: DayCycle) -> Color {
+fn cast_ray(ray_origin: &Vector3, ray_direction: &Vector3, world: &VoxelWorld, skybox: &Skybox, cycle: DayCycle, max_bounces: u8) -> Color {
+    cast_ray_depth(ray_origin, ray_direction, world, skybox, cycle, 0, max_bounces)
+}
+
+fn cast_ray_depth(ray_origin: &Vector3, ray_direction: &Vector3, world: &VoxelWorld, skybox: &Skybox, cycle: DayCycle, depth: u8, max_bounces: u8) -> Color {
     let sky = skybox.sample(ray_direction, cycle);
     let mut origin = *ray_origin;
     let mut accumulated = [0.0_f32; 3];
@@ -101,15 +105,60 @@ fn cast_ray(ray_origin: &Vector3, ray_direction: &Vector3, world: &VoxelWorld, s
         let mut color = hit
             .color
             .unwrap_or_else(|| hit.material.color_at(hit.position, hit.normal));
+        color.r = (color.r as f32 * hit.material.albedo).clamp(0.0, 255.0) as u8;
+        color.g = (color.g as f32 * hit.material.albedo).clamp(0.0, 255.0) as u8;
+        color.b = (color.b as f32 * hit.material.albedo).clamp(0.0, 255.0) as u8;
         let emitted = world.emission_at(hit.position, hit.normal);
         let self_emission = hit.material.emission;
         let sun = hit.normal.dot(cycle.sun_direction).max(0.0) * cycle.daylight;
         let moon = hit.normal.dot(cycle.moon_direction).max(0.0) * 0.07;
         let daylight = 0.10 + sun * 0.90 + moon;
+        let view_direction = *ray_direction * -1.0;
+        let half_vector = (cycle.sun_direction + view_direction).normalize();
+        let specular_light = hit.material.specular
+            * hit.normal.dot(half_vector).max(0.0).powf(48.0)
+            * cycle.daylight;
         color.r = (color.r as f32 * daylight + emitted[0] + color.r as f32 * self_emission).clamp(0.0, 255.0) as u8;
         color.g = (color.g as f32 * daylight + emitted[1] + color.g as f32 * self_emission).clamp(0.0, 255.0) as u8;
         color.b = (color.b as f32 * daylight + emitted[2] + color.b as f32 * self_emission).clamp(0.0, 255.0) as u8;
-        let alpha = color.a as f32 / 255.0;
+        color.r = (color.r as f32 + 255.0 * specular_light).clamp(0.0, 255.0) as u8;
+        color.g = (color.g as f32 + 244.0 * specular_light).clamp(0.0, 255.0) as u8;
+        color.b = (color.b as f32 + 220.0 * specular_light).clamp(0.0, 255.0) as u8;
+        if depth < max_bounces && (hit.material.reflection > 0.0 || hit.material.refraction > 0.0) {
+            let mut normal = hit.normal;
+            let entering = ray_direction.dot(normal) < 0.0;
+            if !entering { normal = normal * -1.0; }
+            let cosine = (-ray_direction.dot(normal)).clamp(0.0, 1.0);
+            let ior = hit.material.refractive_index;
+            let eta = if entering { 1.0 / ior } else { ior };
+            let f0 = ((ior - 1.0) / (ior + 1.0)).powi(2);
+            let fresnel = f0 + (1.0 - f0) * (1.0 - cosine).powi(5);
+            let reflected_direction = (*ray_direction - normal * (2.0 * ray_direction.dot(normal))).normalize();
+            let reflected = cast_ray_depth(
+                &(hit.position + normal * 0.003), &reflected_direction, world, skybox, cycle, depth + 1, max_bounces,
+            );
+            let mut reflection_weight = hit.material.reflection + hit.material.refraction * fresnel;
+            let mut transmission_weight = 0.0;
+            let mut transmitted = Color::new(0, 0, 0, 255);
+            if hit.material.refraction > 0.0 {
+                let discriminant = 1.0 - eta * eta * (1.0 - cosine * cosine);
+                if discriminant >= 0.0 {
+                    let direction = (*ray_direction * eta + normal * (eta * cosine - discriminant.sqrt())).normalize();
+                    transmitted = cast_ray_depth(
+                        &(hit.position - normal * 0.003), &direction, world, skybox, cycle, depth + 1, max_bounces,
+                    );
+                    transmission_weight = hit.material.refraction * (1.0 - fresnel);
+                } else {
+                    reflection_weight += hit.material.refraction;
+                }
+            }
+            let surface_weight = (1.0 - hit.material.reflection - hit.material.refraction).max(0.0);
+            let weight_sum = (surface_weight + reflection_weight + transmission_weight).max(f32::EPSILON);
+            color.r = ((color.r as f32 * surface_weight + reflected.r as f32 * reflection_weight + transmitted.r as f32 * transmission_weight) / weight_sum).clamp(0.0, 255.0) as u8;
+            color.g = ((color.g as f32 * surface_weight + reflected.g as f32 * reflection_weight + transmitted.g as f32 * transmission_weight) / weight_sum).clamp(0.0, 255.0) as u8;
+            color.b = ((color.b as f32 * surface_weight + reflected.b as f32 * reflection_weight + transmitted.b as f32 * transmission_weight) / weight_sum).clamp(0.0, 255.0) as u8;
+        }
+        let alpha = (color.a as f32 / 255.0) * (1.0 - hit.material.transparency);
         accumulated[0] += color.r as f32 * alpha * transmittance;
         accumulated[1] += color.g as f32 * alpha * transmittance;
         accumulated[2] += color.b as f32 * alpha * transmittance;
@@ -128,7 +177,7 @@ fn cast_ray(ray_origin: &Vector3, ray_direction: &Vector3, world: &VoxelWorld, s
     )
 }
 
-fn render(framebuffer: &mut Framebuffer, world: &VoxelWorld, camera: &FlyCamera, skybox: &Skybox, cycle: DayCycle) {
+fn render(framebuffer: &mut Framebuffer, world: &VoxelWorld, camera: &FlyCamera, skybox: &Skybox, cycle: DayCycle, max_bounces: u8) {
     let width_px = framebuffer.width as usize;
     let height_px = framebuffer.height as usize;
     if width_px == 0 || height_px == 0 {
@@ -154,7 +203,7 @@ fn render(framebuffer: &mut Framebuffer, world: &VoxelWorld, camera: &FlyCamera,
             let screen_y = (1.0 - (2.0 * y as f32) / height) * perspective_scale;
             for (pixel, &screen_x) in row.chunks_exact_mut(4).zip(column_x.iter()) {
                 let ray_direction = basis.ray_direction(screen_x, screen_y);
-                let color = cast_ray(&basis.origin, &ray_direction, world, skybox, cycle);
+                let color = cast_ray(&basis.origin, &ray_direction, world, skybox, cycle, max_bounces);
                 pixel.copy_from_slice(&[color.r, color.g, color.b, 255]);
             }
         });
@@ -219,7 +268,7 @@ fn main() {
 
         if last_camera_motion.elapsed() < Duration::from_millis(180) {
             let started = Instant::now();
-            render(&mut preview_framebuffer, &world, &camera, &skybox, day_cycle);
+            render(&mut preview_framebuffer, &world, &camera, &skybox, day_cycle, 1);
             let render_ms = started.elapsed().as_secs_f32() * 1000.0;
             preview_framebuffer.swap_buffers(&mut window, &raylib_thread);
 
@@ -236,7 +285,7 @@ fn main() {
             }
         } else {
             if needs_full_render {
-                render(&mut framebuffer, &world, &camera, &skybox, day_cycle);
+                render(&mut framebuffer, &world, &camera, &skybox, day_cycle, 3);
                 needs_full_render = false;
             }
             framebuffer.swap_buffers(&mut window, &raylib_thread);

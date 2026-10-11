@@ -7,7 +7,16 @@ use raylib::prelude::*;
 #[derive(Clone)]
 pub struct Material {
     pub diffuse: Color,
+    /// Diffuse reflectance multiplier.
+    pub albedo: f32,
+    /// Strength of the direct specular highlight.
+    pub specular: f32,
+    /// Fraction of the surface color that transmits the background.
+    pub transparency: f32,
     pub emission: f32,
+    pub reflection: f32,
+    pub refraction: f32,
+    pub refractive_index: f32,
     textures: Option<Arc<BlockTextures>>,
 }
 
@@ -33,7 +42,13 @@ impl Material {
     pub fn solid(diffuse: Color) -> Self {
         Self {
             diffuse,
+            albedo: 1.0,
+            specular: 0.0,
+            transparency: 0.0,
             emission: 0.0,
+            reflection: 0.0,
+            refraction: 0.0,
+            refractive_index: 1.0,
             textures: None,
         }
     }
@@ -43,10 +58,42 @@ impl Material {
         self
     }
 
+    pub fn with_albedo(mut self, albedo: f32) -> Self {
+        self.albedo = albedo.clamp(0.0, 1.0);
+        self
+    }
+
+    pub fn with_specular(mut self, specular: f32) -> Self {
+        self.specular = specular.clamp(0.0, 1.0);
+        self
+    }
+
+    pub fn with_transparency(mut self, transparency: f32) -> Self {
+        self.transparency = transparency.clamp(0.0, 1.0);
+        self
+    }
+
+    pub fn with_reflection(mut self, reflection: f32) -> Self {
+        self.reflection = reflection.clamp(0.0, 1.0);
+        self
+    }
+
+    pub fn with_refraction(mut self, refraction: f32, refractive_index: f32) -> Self {
+        self.refraction = refraction.clamp(0.0, 1.0);
+        self.refractive_index = refractive_index.max(1.0);
+        self
+    }
+
     fn textured(diffuse: Color, textures: BlockTextures) -> Self {
         Self {
             diffuse,
+            albedo: 1.0,
+            specular: 0.0,
+            transparency: 0.0,
             emission: 0.0,
+            reflection: 0.0,
+            refraction: 0.0,
+            refractive_index: 1.0,
             textures: Some(Arc::new(textures)),
         }
     }

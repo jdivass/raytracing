@@ -1229,7 +1229,17 @@ fn material_for_block(block_state: &str, textures: &mut TextureLibrary) -> Optio
         "lava" => 1.8,
         _ => 0.0,
     };
-    Some(material.with_emission(emission))
+    let material = material.with_emission(emission);
+    if block == "water" {
+        Some(material
+            .with_albedo(0.72)
+            .with_specular(0.45)
+            .with_transparency(0.10)
+            .with_reflection(0.10)
+            .with_refraction(0.88, 1.333))
+    } else {
+        Some(material)
+    }
 }
 
 fn shapes_for_block(block_state: &str) -> Vec<BlockShape> {
