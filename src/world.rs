@@ -18,6 +18,7 @@ pub struct VoxelWorld {
     models: Vec<VoxelBlock>,
     min: Vector3,
     max: Vector3,
+    emitters: Vec<(Vector3, Color, f32)>,
 }
 
 #[derive(Clone)]
@@ -119,6 +120,21 @@ impl VoxelWorld {
             min.z + schematic.length as f32,
         );
 
+        let mut emitters = Vec::new();
+        for y in 0..schematic.height {
+            for z in 0..schematic.length {
+                for x in 0..schematic.width {
+                    let index = x + z * schematic.width + y * schematic.width * schematic.length;
+                    if let Some(model_index) = blocks[index] {
+                        let material = &models[model_index].material;
+                        if material.emission > 0.0 {
+                            emitters.push((Vector3::new(min.x + x as f32 + 0.3, y as f32 + 0.3, min.z + z as f32 + 0.3), material.diffuse, material.emission));
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(Self {
             width: schematic.width,
             height: schematic.height,
@@ -127,7 +143,26 @@ impl VoxelWorld {
             models,
             min,
             max,
+            emitters,
         })
+    }
+
+    /// Approximate direct illumination from emissive blocks. The falloff is
+    /// intentionally bounded so large scenes remain inexpensive to render.
+    pub fn emission_at(&self, position: Vector3, normal: Vector3) -> [f32; 3] {
+        let mut light = [0.0; 3];
+        for (source, color, strength) in &self.emitters {
+            let offset = *source - position;
+            let distance_squared = offset.length_sqr();
+            if distance_squared < 0.01 || distance_squared > 144.0 { continue; }
+            let direction = offset * (1.0 / distance_squared.sqrt());
+            let facing = normal.dot(direction).max(0.0);
+            let amount = strength * facing / (1.0 + distance_squared * 0.35);
+            light[0] += color.r as f32 * amount;
+            light[1] += color.g as f32 * amount;
+            light[2] += color.b as f32 * amount;
+        }
+        light
     }
 
     pub fn camera_start(&self) -> Vector3 {
@@ -1186,7 +1221,15 @@ fn material_for_block(block_state: &str, textures: &mut TextureLibrary) -> Optio
         _ => (150, 150, 150),
     };
 
-    Some(textures.material_for(block, Color::new(color.0, color.1, color.2, 255)))
+    let material = textures.material_for(block, Color::new(color.0, color.1, color.2, 255));
+    let emission = match block {
+        "lantern" | "soul_lantern" => 1.5,
+        "torch" | "wall_torch" | "candle" => 1.0,
+        "glowstone" | "sea_lantern" | "shroomlight" | "ochre_froglight" | "pearlescent_froglight" | "verdant_froglight" => 2.4,
+        "lava" => 1.8,
+        _ => 0.0,
+    };
+    Some(material.with_emission(emission))
 }
 
 fn shapes_for_block(block_state: &str) -> Vec<BlockShape> {

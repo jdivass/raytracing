@@ -39,8 +39,6 @@ impl Skybox {
         Self { width, height, pixels }
     }
 
-    // The supplied image is a wide landscape panorama. Map the ray's heading
-    // around the horizon and its elevation vertically, wrapping at the sides.
     fn sample(&self, direction: &Vector3) -> Color {
         let yaw = direction.x.atan2(direction.z);
         let pitch = direction.y.clamp(-1.0, 1.0).asin();
@@ -62,9 +60,14 @@ fn cast_ray(ray_origin: &Vector3, ray_direction: &Vector3, world: &VoxelWorld, s
         let Some(hit) = world.ray_intersect(&origin, ray_direction) else {
             break;
         };
-        let color = hit
+        let mut color = hit
             .color
             .unwrap_or_else(|| hit.material.color_at(hit.position, hit.normal));
+        let emitted = world.emission_at(hit.position, hit.normal);
+        let self_emission = hit.material.emission;
+        color.r = (color.r as f32 + emitted[0] + color.r as f32 * self_emission).clamp(0.0, 255.0) as u8;
+        color.g = (color.g as f32 + emitted[1] + color.g as f32 * self_emission).clamp(0.0, 255.0) as u8;
+        color.b = (color.b as f32 + emitted[2] + color.b as f32 * self_emission).clamp(0.0, 255.0) as u8;
         let alpha = color.a as f32 / 255.0;
         accumulated[0] += color.r as f32 * alpha * transmittance;
         accumulated[1] += color.g as f32 * alpha * transmittance;
@@ -97,7 +100,6 @@ fn render(framebuffer: &mut Framebuffer, world: &VoxelWorld, camera: &FlyCamera,
     let aspect_ratio = width / height;
     let perspective_scale = (fov / 2.0).tan();
 
-    // Todo lo que no depende del píxel se calcula una vez por frame.
     let basis = camera.basis();
     let column_x: Vec<f32> = (0..width_px)
         .map(|x| ((2.0 * x as f32) / width - 1.0) * aspect_ratio * perspective_scale)
@@ -131,7 +133,7 @@ fn main() {
     let (mut window, raylib_thread) = raylib::init()
         .size(window_width, window_height)
         .fullscreen()
-        .title("Raytracer Example")
+        .title("Raytracer")
         .log_level(TraceLogLevel::LOG_WARNING)
         .build();
     window.disable_cursor();

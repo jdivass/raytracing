@@ -7,6 +7,7 @@ use raylib::prelude::*;
 #[derive(Clone)]
 pub struct Material {
     pub diffuse: Color,
+    pub emission: f32,
     textures: Option<Arc<BlockTextures>>,
 }
 
@@ -32,13 +33,20 @@ impl Material {
     pub fn solid(diffuse: Color) -> Self {
         Self {
             diffuse,
+            emission: 0.0,
             textures: None,
         }
+    }
+
+    pub fn with_emission(mut self, emission: f32) -> Self {
+        self.emission = emission.max(0.0);
+        self
     }
 
     fn textured(diffuse: Color, textures: BlockTextures) -> Self {
         Self {
             diffuse,
+            emission: 0.0,
             textures: Some(Arc::new(textures)),
         }
     }
