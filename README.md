@@ -1,4 +1,4 @@
-# Raytracer de un diorama voxel
+# Raytracing
 
 Proyecto en Rust que renderiza un diorama de estilo Minecraft mediante trazado de rayos. Carga una construcción desde un schematic, usa sus modelos y texturas y permite recorrerla en una ventana a pantalla completa.
 
